@@ -63,7 +63,7 @@ scikit-learn>=1.3   # DBSCAN clustering (speaker identity)
 # EXTERNAL MODEL REPOS (not on PyPI)
 # TalkNet-ASD — Active Speaker Detection
 #   git clone https://github.com/TaoRuijie/TalkNet-ASD.git  (în rădăcina repo-ului)
-#   pip install -e TalkNet-ASD/
+#   ATÂT — repo-ul nu are setup.py; codul îl ia direct pe sys.path.
 #
 # SyncNet — Audio-Visual Sync Verification
 #   Bundled in  backend/services/speaker_detector/syncnet.py  using the model file

@@ -5,7 +5,7 @@
 #   TrackCropReader  (track_crops.py)      opencv-python, numpy
 #   TalkNetASD       (active_speaker.py)   torch + the external TalkNet-ASD repo:
 #                                          git clone github.com/TaoRuijie/TalkNet-ASD
-#                                          && pip install -e TalkNet-ASD/
+#                                          (fără pip install — pe sys.path)
 #                                          weights: models/talknet_asd.pth
 #   SpeakerSelector  (speaker_selector.py) pure logic over the above
 #   SyncNetModel     (syncnet_model.py)    torch (architecture only)

@@ -29,6 +29,14 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _BACKEND_DIR.parent
 sys.path[:0] = [str(_BACKEND_DIR), str(_BACKEND_DIR / "shared")]
 
+# TalkNet-ASD (repo extern, fără setup.py) — importat direct de pe disc,
+# ca în cli.py: rădăcina repo-ului sau models/.
+for _talknet in [_PROJECT_ROOT / "TalkNet-ASD",
+                 _PROJECT_ROOT / "models" / "TalkNet-ASD"]:
+    if _talknet.exists():
+        sys.path.insert(0, str(_talknet))
+        break
+
 import yaml  # noqa: E402
 from loguru import logger  # noqa: E402
 

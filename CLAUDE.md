@@ -13,7 +13,6 @@ A pipeline that builds a Romanian Visual Speech Recognition (VSR) dataset from Y
 python -m venv .venv
 source .venv/Scripts/activate       # Windows Git Bash
 pip install -r requirements.txt
-pip install -e TalkNet-ASD/         # ASD model — must be cloned/symlinked first
 
 # Fetch model weights (manifest: config/models.yaml; --check / --pin / --only)
 python backend/tools/fetch_models.py
@@ -133,7 +132,7 @@ ALL metadata lives in `data/catalog/dataset.db` (SQLite, WAL) — written automa
 
 ### External model dependencies
 
-- **TalkNet-ASD** — must be cloned/symlinked to `TalkNet-ASD/` and installed with `pip install -e TalkNet-ASD/`. Weights at `models/talknet_asd.pth`.
+- **TalkNet-ASD** — clone into `TalkNet-ASD/` at the repo root (NO pip install — the repo has no setup.py; cli/worker put it on sys.path, Docker via PYTHONPATH). Weights at `models/talknet_asd.pth`.
 - **SyncNet** — bundled in `backend/services/speaker_detector/syncnet.py`. Weights at `models/syncnet_v2.pth`.
 - **WhisperX** — weights downloaded automatically on first use.
 - **RetinaFace** — loaded via the `retinaface-pytorch` PyPI package.

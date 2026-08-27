@@ -48,8 +48,9 @@ memory=8GB
 git clone <URL-repo> vsr
 cd vsr
 
-# TalkNet-ASD (detecția vorbitorului activ) — repo extern, clonat în rădăcină
-# (imaginea de worker îl vendorizează la build):
+# TalkNet-ASD (detecția vorbitorului activ) — repo extern, clonat în rădăcină.
+# ATÂT: nu se instalează cu pip (nu are setup.py) — codul îl ia de pe disc;
+# imaginea de worker îl copiază la build.
 git clone https://github.com/TaoRuijie/TalkNet-ASD.git
 ```
 
@@ -58,8 +59,11 @@ git clone https://github.com/TaoRuijie/TalkNet-ASD.git
 ## 3. Configurarea
 
 ```bash
-cp .env.example .env      # apoi completează:
+cp .env.example .env        # macOS/Linux/Git Bash
+copy .env.example .env      # Windows (cmd)
 ```
+
+apoi completează:
 
 - **`HF_TOKEN`** în `.env` — pentru diarizare (cine vorbește când):
   1. cont pe [huggingface.co](https://huggingface.co) → deschide pagina
@@ -193,7 +197,6 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 # varianta completă (mașina cu GPU):
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt -r backend/api/requirements.txt
-pip install -e TalkNet-ASD/
 
 # varianta doar-API (fără GPU, ~50 MB):
 pip install -r backend/api/requirements.txt

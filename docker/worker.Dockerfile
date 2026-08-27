@@ -27,10 +27,12 @@ COPY requirements.txt /tmp/requirements.txt
 RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt && \
     python -m pip install --no-cache-dir onnxruntime-gpu
 
-# 3. TalkNet vendorizat (clonat în rădăcina repo-ului înainte de build)
+# 3. TalkNet vendorizat (clonat în rădăcina repo-ului înainte de build).
+# Repo-ul oficial NU are setup.py — nu se instalează cu pip; codul îl
+# importă direct (`from talkNet import ...`), deci ajunge pe PYTHONPATH.
 WORKDIR /app
 COPY TalkNet-ASD/ TalkNet-ASD/
-RUN python -m pip install --no-cache-dir -e TalkNet-ASD/
+ENV PYTHONPATH=/app/TalkNet-ASD
 
 # 4. codul (ultimul layer — se schimbă cel mai des)
 COPY backend/  backend/
