@@ -114,12 +114,16 @@ def check_packages(report: Report):
         except Exception as e:
             report.line(False, package, str(e)[:60], warn=True)
     print("PACHETE (api)")
+    # Avertisment, nu blocant: în containerul de worker API-ul lipsește prin
+    # design (are containerul lui); blocant e doar pe o mașină all-in-one.
     for package in _API_PACKAGES:
         try:
             importlib.import_module(package)
             report.line(True, package)
         except Exception as e:
-            report.line(False, package, str(e)[:60])
+            report.line(False, package,
+                        "lipsă aici — OK dacă API-ul rulează în containerul lui",
+                        warn=True)
 
 
 def check_models(report: Report, models_dir: Path, quick: bool):

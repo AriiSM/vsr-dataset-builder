@@ -103,8 +103,7 @@ folderul e complet și portabil (copiabil pe stick, pe mașini fără internet).
 
 ```bash
 # descarcă tot ce se poate automat (buffalo_l, Whisper, Silero):
-docker compose -f docker/compose.yaml run --rm worker \
-    python backend/tools/fetch_models.py
+docker compose -f docker/compose.yaml run --rm worker python backend/tools/fetch_models.py
 ```
 
 - **`talknet_asd.pth` + `syncnet_v2.pth`** nu au URL public stabil: copiază-le
@@ -113,8 +112,7 @@ docker compose -f docker/compose.yaml run --rm worker \
 
 ```bash
 # fixează hash-urile fișierelor prezente (integritate garantată de-acum):
-docker compose -f docker/compose.yaml run --rm worker \
-    python backend/tools/fetch_models.py --pin
+docker compose -f docker/compose.yaml run --rm worker python backend/tools/fetch_models.py --pin
 ```
 
 ---
@@ -122,8 +120,7 @@ docker compose -f docker/compose.yaml run --rm worker \
 ## 6. Verificarea mașinii — `doctor`
 
 ```bash
-docker compose -f docker/compose.yaml run --rm worker \
-    python backend/tools/doctor.py
+docker compose -f docker/compose.yaml run --rm worker python backend/tools/doctor.py
 ```
 
 Raport verde/roșu: sistem, GPU + VRAM, pachete, modele (prezență + hash),
@@ -136,8 +133,7 @@ pipeline-ul până nu e verde tot ce e blocant** (exit 1 = mai ai de rezolvat).
 
 ```bash
 # structura data/ + catalogul SQLite (o singură dată):
-docker compose -f docker/compose.yaml run --rm worker \
-    python backend/orchestrator/cli.py init ./data
+docker compose -f docker/compose.yaml run --rm worker python backend/orchestrator/cli.py init ./data
 
 # pornirea aplicației:
 docker compose -f docker/compose.yaml --profile ui --profile worker up -d
@@ -172,8 +168,9 @@ Catalogul se deschide cu [DB Browser for SQLite](https://sqlitebrowser.org):
 docker compose -f docker/compose.yaml ps                  # ce rulează
 docker compose -f docker/compose.yaml logs -f worker      # logul workerului
 docker compose -f docker/compose.yaml down                # oprire (datele rămân)
-docker compose -f docker/compose.yaml build && \
-docker compose -f docker/compose.yaml --profile ui --profile worker up -d   # update după schimbări de cod
+# update după schimbări de cod (build + repornire):
+docker compose -f docker/compose.yaml build
+docker compose -f docker/compose.yaml --profile ui --profile worker up -d
 
 # sănătatea datelor + exporturi CSV la cerere:
 docker compose -f docker/compose.yaml run --rm worker python backend/tools/verify_dataset.py
