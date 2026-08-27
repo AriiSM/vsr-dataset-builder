@@ -13,7 +13,7 @@ FROM ${CUDA_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 python3.10-venv python3-pip ffmpeg git \
+        python3.10 python3.10-venv python3-pip ffmpeg git nodejs \
         libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3.10 /usr/local/bin/python
