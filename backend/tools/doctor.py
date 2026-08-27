@@ -172,7 +172,9 @@ def check_catalog(report: Report, catalog_dir: Path):
         db.close()
         report.line(version == SCHEMA_VERSION, "schema",
                     f"v{version} (așteptat v{SCHEMA_VERSION})")
-        report.line(journal.lower() == "wal", "journal", journal)
+        report.line(journal.lower() in ("wal", "delete"), "journal",
+                    journal + ("" if journal.lower() == "wal"
+                               else " (fallback bind-mount Windows — OK)"))
         report.line(True, "conținut",
                     f"{overview.get('num_segments', 0)} segmente · "
                     f"{overview.get('num_videos', 0)} video-uri")
