@@ -13,10 +13,11 @@ COPY backend/api/          backend/api/
 COPY backend/shared/       backend/shared/
 COPY backend/run_api.py    backend/run_api.py
 
-# Volumele montează peste acestea la runtime (compose)
-RUN mkdir -p data config && \
-    useradd --create-home vsr && chown -R vsr:vsr /app
-USER vsr
+# Volumele montează peste acestea la runtime (compose).
+# Rulează ca root, la fel ca workerul: pe bind-mount-uri (Windows/WSL2 mai
+# ales) un utilizator ne-root nu poate scrie fișierele create de celălalt
+# container (dataset.db, cache, logs) — „attempt to write a readonly database".
+RUN mkdir -p data config
 
 ARG GIT_SHA=""
 ENV GIT_SHA=${GIT_SHA} \
