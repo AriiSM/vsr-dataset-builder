@@ -1,0 +1,70 @@
+# ROOT requirements — STACK-UL COMPLET (mașina de procesare / imaginea vsr-worker).
+# API-ul singur (mașină fără GPU) are lista lui separată: backend/api/requirements.txt
+# Rețeta completă e în README.md §2a / §9.
+#
+numpy>=1.24
+pandas>=2.0
+PyYAML>=6.0            # Config file parsing
+
+# VIDEO / IMAGE
+opencv-python>=4.8
+Pillow>=10.0           # Image handling in the review GUI
+
+soundfile>=0.12
+imageio-ffmpeg>=0.4    # Bundles ffmpeg binary (audio extraction)
+
+# SPEECH / ASR
+# WhisperX — Whisper with word-level timestamp alignment
+# Requires a compatible version of faster-whisper underneath.
+whisperx>=3.1
+# Diarization (speaker turns) — gated HF model, token in config.yaml:
+pyannote.audio>=3.1
+
+# PYTORCH — CUDA build (RTX 3050 Ti, CUDA 12.8)
+# Install with:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# CPU fallback (no GPU):
+#   pip install torch torchaudio
+torch>=2.1
+torchaudio>=2.1
+
+# RetinaFace detector used for face detection in every clip.
+# Two packages exist — use retinaface-pytorch (has pre_trained_models API):
+#   pip install retinaface-pytorch
+retinaface-pytorch>=0.0.1
+
+python_speech_features>=0.6  # MFCC features required by TalkNet-ASD
+scipy>=1.11            # wavfile I/O, zoom, linear_sum_assignment
+mediapipe>=0.10        # FaceMesh dense lip landmarks for the 96×96 mouth crop
+yt-dlp>=2024.1         # YouTube download with Creative Commons filtering
+loguru>=0.7
+
+# WER computation between original Whisper transcript and reviewer-edited text.
+# (Pure-python fallback exists in backend/shared/vsr_shared/wer_utils.py if jiwer is missing.)
+jiwer>=3.0
+
+# ArcFace face embeddings — first-pass speaker identity (quality_indexer):
+# per-segment evidence at export → DBSCAN per video → cross-video re-ID.
+#
+# MODEL WEIGHTS (auto-downloaded on first run of cluster_speakers.py):
+#   models/insightface/models/buffalo_l/    ~250MB (fetch: python backend/tools/fetch_models.py)
+#     ├─ det_10g.onnx        — RetinaFace detector
+#     ├─ w600k_r50.onnx      — ArcFace ResNet50 embeddings (512-d)
+#     ├─ 1k3d68.onnx         — 3D landmarks
+#     ├─ 2d106det.onnx       — 2D landmarks
+#     └─ genderage.onnx      — gender + age estimator
+#
+#
+# For CUDA inference: pip install onnxruntime-gpu instead of onnxruntime.
+insightface>=0.7
+onnxruntime>=1.16
+scikit-learn>=1.3   # DBSCAN clustering (speaker identity)
+
+# EXTERNAL MODEL REPOS (not on PyPI)
+# TalkNet-ASD — Active Speaker Detection
+#   git clone https://github.com/TaoRuijie/TalkNet-ASD.git  (în rădăcina repo-ului)
+#   pip install -e TalkNet-ASD/
+#
+# SyncNet — Audio-Visual Sync Verification
+#   Bundled in  backend/services/speaker_detector/syncnet.py  using the model file
+#   models/syncnet_v2.pth  (vezi config/models.yaml + backend/tools/fetch_models.py).

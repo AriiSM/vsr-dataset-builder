@@ -1,0 +1,30 @@
+# CRITIC: fără acest fișier, contextul de build ar căra sutele de GB din
+# data/ + modelele + node_modules la FIECARE docker build.
+data/
+models/
+temp/
+logs/
+.venv/
+venv/
+
+frontend/node_modules/
+# dist/ NU se exclude — imaginea de frontend se construiește din sursă oricum,
+# dar api-ul îl poate servi la rularea nativă.
+
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+.git/
+.gitignore
+.env
+*.log
+.DS_Store
+
+# documente de lucru — nu aparțin imaginilor
+plan.html
+plan.md
+PIPELINE_NOTES.md
+lip-reading-ghid.html
+backend/tools/legacy/

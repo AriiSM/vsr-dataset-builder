@@ -1,0 +1,18 @@
+# mouth_exporter — segment export: mouth/face crops + audio + text  [CPU]
+#
+# Class → dependency map:
+#   MouthLandmarker      (mouth_landmarks.py)    mediapipe (FaceMesh, CPU)
+#   OneEuroFilter        (mouth_landmarks.py)    stdlib math
+#   crop trajectories    (crop_trajectories.py)  numpy (+ scipy only on the
+#                                                gaussian smoothing paths)
+#   FfmpegPipeWriter     (video_encoder.py)      imageio-ffmpeg (bundled ffmpeg)
+#   write_segment_audio  (audio_slicer.py)       stdlib wave — zero deps
+#   annotation I/O       (annotation_io.py)      stdlib
+#   SegmentExporter      (segment_exporter.py)   opencv-python (decode/crop)
+
+mediapipe>=0.10
+opencv-python>=4.8
+numpy>=1.24
+scipy>=1.11
+imageio-ffmpeg>=0.4
+loguru>=0.7

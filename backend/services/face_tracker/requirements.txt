@@ -1,0 +1,18 @@
+# face_tracker — face detection + identity tracking  [GPU]
+#
+# Class → dependency map:
+#   RetinaFaceDetector (face_detector.py)   torch + retinaface-pytorch
+#                                           (NOTE: 'retinaface-pytorch', NOT the
+#                                           TensorFlow package 'retina-face')
+#   KalmanBBoxFilter   (kalman_filter.py)   opencv-python (cv2.KalmanFilter)
+#   FaceTracker        (face_tracker.py)    pure logic (geometry only)
+#   FaceTrack/geometry                      numpy
+#   VideoProcessor     (video_processor.py) orchestration only
+
+# CUDA install (RTX 3050 Ti):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+torch>=2.1
+retinaface-pytorch>=0.0.1
+opencv-python>=4.8
+numpy>=1.24
+loguru>=0.7

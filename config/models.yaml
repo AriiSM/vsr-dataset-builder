@@ -1,0 +1,79 @@
+# Model manifest — everything backend/tools/fetch_models.py knows how to
+# fetch and verify, and everything backend/tools/doctor.py checks.
+#
+# Entry fields:
+#   path      target, relative to models_dir (config paths.models_dir)
+#   kind      direct   — plain HTTP(S) download (works with NO ML libs installed)
+#             archive  — direct download of a zip, extracted into `extract_to`
+#             hub      — pre-download through a Python lib (torch/whisperx/...);
+#                        runs only where that lib is installed (the GPU machine)
+#             manual   — no stable public URL; place the file yourself (or set
+#                        `url` after uploading it to your own HF repo)
+#   url       source (direct/archive); null for manual until you host it
+#   sha256    integrity pin; null = not pinned yet — run fetch_models.py --pin
+#             on the machine that has the file to record it
+#   required  doctor reports missing required models as RED (else yellow)
+#
+# ALL caches are redirected under models_dir (TORCH_HOME, HF_HOME,
+# INSIGHTFACE_HOME — see vsr_shared/model_env.py), so this ONE folder is the
+# complete, portable model store: copy it to an offline machine and everything
+# just works.
+
+models:
+  talknet_asd:
+    path: talknet_asd.pth
+    kind: manual
+    url: null            # recommended: upload once to your HF repo, put link here
+    sha256: null         # pin with: python backend/tools/fetch_models.py --pin
+    required: true
+    note: "TalkNet-ASD weights — original Google Drive link is unstable."
+
+  syncnet_v2:
+    path: syncnet_v2.pth
+    kind: manual
+    url: null
+    sha256: null
+    required: true
+    note: "SyncNet weights (research/non-commercial — see original repo)."
+
+  insightface_buffalo_l:
+    path: insightface/models/buffalo_l
+    kind: archive
+    url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
+    extract_to: insightface/models/buffalo_l
+    sha256: null         # pin after first download
+    required: true
+    note: "ArcFace + gender/age (speaker identity). Direct download, no libs needed."
+
+  whisper_medium:
+    path: huggingface     # lands in the redirected HF cache under models_dir
+    kind: hub
+    hub: faster_whisper
+    model_name: medium
+    required: true
+    note: "Pipeline ASR. Pre-downloads only where faster-whisper/whisperx exists."
+
+  whisper_large_v3:
+    path: huggingface
+    kind: hub
+    hub: faster_whisper
+    model_name: large-v3
+    required: false
+    note: "Second-opinion ASR (review assistant R1)."
+
+  silero_vad:
+    path: torch/hub
+    kind: hub
+    hub: torch_hub
+    repo: snakers4/silero-vad
+    required: true
+    note: "VAD. Pre-downloads via torch.hub only where torch exists."
+
+  pyannote_diarization:
+    path: huggingface
+    kind: hub
+    hub: pyannote
+    model_name: pyannote/speaker-diarization-3.1
+    required: false
+    note: "GATED on HF: accept terms + set segmentation.diarization.hf_token
+           in config.yaml. Downloads on first pipeline run."

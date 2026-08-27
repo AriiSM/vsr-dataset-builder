@@ -1,0 +1,301 @@
+# Romanian VSR Dataset Pipeline v2 Configuration
+
+# ===== Paths =====
+paths:
+  base_dir: "./data"
+  models_dir: "./models"
+  temp_dir: "./temp"
+  # Storage v2: ALL metadata lives in {catalog_dir}/dataset.db (SQLite, WAL).
+  # CSVs become on-demand exports (backend/tools/export_catalog.py).
+  catalog_dir: "./data/catalog"
+  # Derived paths (base_dir relative) — set explicitly to override:
+  # raw_dir, clips_dir, processed_dir
+
+# ===== Download Settings =====
+download:
+  cc_only: true
+  # MAXIMUM quality: prefer H.264 at its best available resolution (usually
+  # 1080p — fast decode, native mp4); otherwise take the absolute best stream
+  # (VP9/AV1 at 1440p/4K) and remux losslessly into mp4. Nothing is ever
+  # re-encoded at download time.
+  # Disk note: 1080p ≈ 2-2.5× the size of 720p (~1-2 GB per 15-min video).
+  # To cap at 720p again, use:
+  #   "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]"
+  format: "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+  rate_limit: "5M"
+  sleep_interval: 2
+  max_retries: 3        # per-video attempts, exponential backoff (5s, 10s, 20s)
+  retry_delay: 5
+  fragment_retries: 10  # per-DASH-fragment retries inside one attempt
+  # YouTube bot-detection bypass — default reads cookies from Chrome.
+  # Change to firefox / edge / brave / opera, or switch to cookies_file, as needed.
+  # The frontend/CLI can override this per-run.
+#  cookies_from_browser: "edge"
+  cookies_file: 'D:\Master\Anul1\Semestrul2\SSL & NLP\Proiect\romanian-vsr-dataset\cookies.txt'    # path to a Netscape-format cookies.txt
+
+# ===== Audio Processing =====
+audio:
+  sample_rate: 16000
+
+  whisper:
+    model: "medium"        # tiny / base / small / medium / large-v2 / large-v3
+    language: "ro"
+    # Word-level timestamps are always produced (WhisperX forced alignment).
+    # The transcription confidence gate lives in clip_filters.min_whisper_confidence.
+    device: "cuda"        # falls back to cpu automatically if CUDA unavailable
+    compute_type: "float16"
+    batch_size: 8         # 4GB VRAM — reduce to 4 if you hit OOM errors
+    # Free GPU memory once full-video transcription is done (sentence strategy),
+    # before RetinaFace / TalkNet are loaded.
+    unload_after_segmentation: true
+
+# ===== Sentence Segmentation (how clips are cut) =====
+# strategy: "sentence" — VAD finds pauses, WhisperX transcribes the WHOLE
+#   video once (words + punctuation + timestamps), and clips are cut at
+#   sentence ends and real speech pauses. A sentence longer than
+#   vad_splitting.max_clip_duration is split at its LARGEST inter-word
+#   pause — never mid-word, never at a blind duration cut.
+# strategy: "vad" — legacy behaviour (silence-only splitting, per-clip
+#   Whisper). Kept for comparison runs.
+segmentation:
+  strategy: "sentence"
+  sentence_end_chars: [".", "?", "!", "…"]
+  # SAFETY NET only: real sentences almost never exceed ~30 s, so 60 s
+  # touches no normal content — it only catches pathological cases (missing
+  # punctuation + failed diarization on a rambling monologue). Even then the
+  # split lands at the LARGEST inter-word pause, never mid-word.
+  # null = no limit at all.
+  max_clip_duration: 60.0
+  # WHO speaks WHEN (pyannote via WhisperX) — adds speaker-turn boundaries:
+  # a reply = a clip, even in fast exchanges with no pause. SETUP (once per
+  # machine): free Hugging Face account → accept terms at
+  # huggingface.co/pyannote/speaker-diarization-3.1 → paste an access token
+  # below. With enabled: false (or a failure), the segmenter falls back to
+  # punctuation + pauses only.
+  diarization:
+    enabled: true
+    hf_token: ""              # REQUIRED when enabled — see setup note above
+    min_speakers: null        # null = let pyannote estimate
+    max_speakers: null
+  # Preferred clip length range: shorter sentences are merged toward
+  # target_min (if the pause between them is <= merge_gap_max); merging
+  # never exceeds target_max.
+  target_min_duration: 2.0    # seconds
+  target_max_duration: 12.0   # seconds
+  merge_gap_max: 1.0          # never merge across a pause longer than this
+  # Lead-in/lead-out around the speech, clamped into the neighbouring
+  # silence so consecutive clips never overlap.
+  boundary_pad: 0.15          # seconds
+  # Whisper words outside VAD speech regions ± this margin are treated as
+  # hallucinations (music/silence) and discarded before cutting.
+  vad_margin: 0.5             # seconds
+  # H.264 quality for the cut clips (the source of the final crop export —
+  # keep CRF low; every generation of loss lands on the lips).
+  clip_crf: 16
+  clip_preset: "veryfast"
+
+# ===== VAD-Based Video Splitting =====
+# VAD parameters used by BOTH strategies (speech regions, pause threshold).
+# min/max_clip_duration act as hard duration bounds in both.
+vad_splitting:
+  vad_threshold: 0.5
+  min_speech_duration_ms: 1000
+  min_silence_duration_ms: 100
+  window_size_samples: 512   # Silero internal window (do not change unless you know why)
+  speech_pad_ms: 200
+
+  # Pause >= split_threshold seconds → start a new clip
+  # Pause < split_threshold seconds → merge into same clip (same sentence)
+  split_threshold: 0.5      # seconds
+
+  # Duration filter for merged clips
+  min_clip_duration: 1.0    # seconds — drop shorter clips
+  max_clip_duration: 15.0   # seconds — drop longer clips
+
+  # Pre-padding (seconds) added to the seek position when cutting clips —
+  # gives transcription a tiny lead-in so word onsets are not chopped.
+  seek_start_padding: 0.05
+
+  # Delete data/clips/{video_id}/ after processing to save space
+  cleanup_clips: true
+
+# ===== Video Processing =====
+video:
+  output_fps: 25
+  output_resolution: [256, 256]
+
+  face_detection:
+    model: "retinaface_resnet50"
+    confidence_threshold: 0.9
+    nms_threshold: 0.4
+    # Every N-th frame — 1 = every frame (slower but most accurate crop)
+    detection_interval: 10
+
+  face_tracking:
+    # Persist the winning track's per-frame trajectory per exported segment
+    # (~50 KB each) — re-export crops with different settings without
+    # re-running RetinaFace. Off by default to save disk.
+    save_tracks: false
+    iou_threshold: 0.3
+    max_age: 30     # frames before a track is dropped (1.2s at 25fps)
+    min_hits: 3     # minimum detections to confirm a track
+    kalman:
+      process_noise: 1.0e-3      # how smooth the model is (smaller = smoother)
+      measurement_noise: 1.0     # how much we trust RetinaFace (smaller = more trust)
+
+# ===== Active Speaker Detection =====
+asd:
+  model_path: "./models/talknet_asd.pth"
+  num_frames_context: 25    # correlation window for the FALLBACK scorer only
+  # null = EVERY track overlapping the speech competes (decision for
+  # 5-speaker panel videos: in wide shots, a size-based top-N cap could
+  # eliminate the real speaker — smaller face in the back — before TalkNet
+  # ever scores them). Set a number only as a speed knob.
+  max_candidate_tracks: null
+  # If TalkNet (or its weights) is missing, the pipeline REFUSES to run rather
+  # than silently producing motion-correlation scores that look like real ASD.
+  # Set to true only if you knowingly accept the degraded fallback scores
+  # (they are recorded as asd_method="fallback_motion" in segments_index.csv).
+  allow_fallback: false
+
+# ===== Audio-Visual Sync =====
+syncnet:
+  model_path: "./models/syncnet_v2.pth"
+  max_offset_frames: 5
+  # Analysis window (seconds, from the MIDDLE of the segment). A/V desync
+  # does not vary within a clip, so the measurement is unchanged while RAM
+  # is capped (~65 MB instead of ~260 MB on 60-second clips).
+  max_analysis_seconds: 10.0
+  enabled: true   # ~1.5-2s/clip on GPU after the batched-forward path in syncnet.py
+  # Same contract as asd.allow_fallback: missing/broken weights are a hard
+  # error unless you explicitly opt into the correlation fallback
+  # (recorded as syncnet_method="fallback_correlation").
+  allow_fallback: false
+
+# ===== Per-Clip Quality Filters =====
+clip_filters:
+  # Drop clip if face visible in fewer than this fraction of frames
+  face_visibility_threshold: 0.80
+
+  # ASD gate: when even the WINNING track's mean score (0-20 scale) is below
+  # this, no visible face matches the audio — voice-over / B-roll / reaction
+  # shot. Such clips are POISON for lip reading (text misaligned with lips),
+  # and dropping them early also skips SyncNet + export + embedding.
+  # 2.0 ≈ 10% speaking probability — conservative; calibrate on the pilot.
+  # 0.0 disables the gate (everything kept, scored by tier only).
+  min_asd_score: 2.0
+  # NOTE: SyncNet never gates (unstable on short clips — Milestone 3 finding);
+  # its confidence feeds quality_tier only.
+
+  # Minimum Whisper word confidence to keep a clip
+  min_whisper_confidence: 0.5
+
+  # Minimum overlap (seconds) between a face track and speech to consider
+  # the track as a candidate, and minimum duration of the trimmed track
+  # window kept for export. Three checks in pipeline._process_clip share
+  # this threshold.
+  min_track_speech_overlap: 0.3
+
+# ===== Export Settings =====
+export:
+  include_audio: true
+  crop_margin: 0.4   # production uses 0.4 (was 0.2 in yaml but code default 0.4 was actually applied)
+  mouth_resolution: [96, 96]
+  video_codec: "libx264"
+  # Final crop quality. CRF 16 ≈ visually lossless — these files are the
+  # training data, so quality beats disk here.
+  video_crf: 16
+  video_preset: "veryfast"
+  # Single-encode export: frames stream straight into the final H.264 file
+  # (audio muxed in the same pass). Set false to roll back to the legacy
+  # two-step path (OpenCV mp4v temp + re-encode, one extra lossy generation).
+  use_ffmpeg_pipe: true
+  # Storage v2: the segment's audio artifact — audio/{segment_id}.wav,
+  # sliced from the clip wav by sample math (stdlib, no external process).
+  save_segment_audio: true
+
+  # Gaussian sigma applied to face-center trajectory across frames before
+  # cropping. Larger = smoother but laggy on quick head moves.
+  gaussian_smoothing_sigma: 3.0
+
+  # Same, applied to the mouth-center trajectory.
+  mouth_gaussian_smoothing_sigma: 3.0
+
+  # When no face detection produces a usable size, fall back to this
+  # half-size (in pixels) for the face crop window.
+  minimum_crop_size_pixels: 64
+
+  # Mouth crop width = max_lip_distance × this factor (provides context).
+  mouth_width_multiplier: 2.5
+
+  # Floor on mouth half-size (pixels) so very small detections still
+  # produce usable crops.
+  mouth_min_half_size_pixels: 48
+
+# ===== Mouth ROI v2 (dense lip landmarks) =====
+# How the 96×96 mouth crop is localized.
+# "mediapipe": MediaPipe FaceMesh on the tracked face ROI, EVERY frame —
+#   40+ lip points, head-pose proxy, roll-aligned grayscale crop compatible
+#   with Auto-AVSR-style pretrained encoders. Runs on CPU (~3-6 ms/frame).
+# "retinaface": legacy 2-point estimate (mouth corners, every Nth frame).
+mouth_roi:
+  method: "mediapipe"
+  min_detection_confidence: 0.5
+  smoothing:
+    type: "one_euro"        # one_euro (low lag on head turns) | gaussian
+    min_cutoff: 1.0
+    beta: 0.3
+  # Crop half-size = median mouth width × this multiplier / 2
+  # (median, not max — one open-mouth frame must not zoom the whole segment)
+  width_multiplier: 1.8
+  # Output convention for pretrained-encoder transfer:
+  grayscale: true           # mouth crop in grayscale (VSR standard)
+  align_roll: true          # rotate so the lip line is horizontal
+  # Above this fraction of frames WITHOUT fresh landmarks, the whole
+  # segment falls back to the retinaface mouth estimate (v1):
+  fail_rate_fallback: 0.50
+
+# ===== Speaker Identity (first pass) =====
+# WHO is speaking, resolved DURING the main run:
+# - each exported segment contributes ArcFace embeddings + gender/age samples
+#   (buffalo_l, CPU) from its face crop;
+# - at the end of the video, DBSCAN clusters them → a speaker who reappears
+#   (anchor ↔ reports ↔ anchor) gets ONE id; gender + numeric age are
+#   estimated per CLUSTER (all frames of that person, median) and written to
+#   speakers_registry.csv (age_estimate, age_std, gender_confidence);
+# - cross_video: cluster centroids persist under data/metadata/embeddings/
+#   so the same news anchor appearing in dozens of videos keeps ONE global
+#   id — correct distinct-speaker statistics and leak-free speaker splits.
+#   Matches are marked identity_match="auto" for auditing in the review GUI.
+speaker_identity:
+  enabled: true
+  samples_per_segment: 5        # frames sampled per exported segment
+  cluster_eps: 0.40             # DBSCAN cosine distance (ArcFace typical)
+  cross_video:
+    enabled: true
+    similarity_threshold: 0.60  # cosine similarity to adopt a known speaker
+
+# ===== Quality Tiers =====
+# Derived per-segment tier (A/B/C) — enables curriculum training and
+# filtering without deleting data. Thresholds are read by quality_tiers.py;
+# recompute offline with backend/tools/rebuild_segments_index.py after
+# changing them (no reprocessing needed).
+# NOTE: calibrate on the pilot run — especially whisper_conf values.
+quality_tiers:
+  preferred_duration: [2.0, 12.0]   # outside range → capped at B
+  tier_a:
+    whisper_conf: 0.90
+    whisper_conf_min: 0.70
+    face_visibility: 0.95
+    mouth_fail_rate: 0.05
+  tier_b:
+    whisper_conf: 0.70
+    whisper_conf_min: 0.50
+    face_visibility: 0.85
+    mouth_fail_rate: 0.15
+
+# ===== Auto Speaker Metadata (legacy) =====
+# ===== Logging =====
+logging:
+  level: "INFO"
+  file: "./logs/pipeline.log"

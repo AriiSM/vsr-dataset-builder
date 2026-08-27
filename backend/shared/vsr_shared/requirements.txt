@@ -1,0 +1,5 @@
+# vsr_shared — scheme CSV, registru vorbitori, WER utils (bibliotecă comună)
+pandas>=2.0
+numpy>=1.24
+PyYAML>=6.0
+jiwer>=3.0             # opțional — fallback pur-python există în wer_utils.py

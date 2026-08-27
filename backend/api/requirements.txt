@@ -1,0 +1,7 @@
+# api — FastAPI command brain (imaginea vsr-api). FĂRĂ torch, FĂRĂ GPU.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pandas>=2.0            # dashboard aggregations over DB-built frames
+numpy>=1.24
+pyyaml>=6.0
+imageio-ffmpeg>=0.4    # bundled ffmpeg for media transcode + thumbnails

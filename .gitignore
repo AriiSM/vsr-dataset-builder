@@ -1,0 +1,52 @@
+# ===== SECRETE / PERSONALE =====
+.env
+cookies.txt
+*.cookies.txt
+
+# ===== DATE (mari, personale) — structura de foldere se păstrează =====
+data/**
+!data/**/
+!data/**/.gitkeep
+!data/README.md
+
+# ===== MODELE (binare mari — fetch_models.py / copiere manuală) =====
+models/**
+!models/.gitkeep
+
+# ===== DEPENDENȚE EXTERNE (se clonează separat — vezi README §2) =====
+TalkNet-ASD/
+
+# ===== RUNTIME / GENERATE =====
+logs/
+temp/
+**/.checkpoint.json
+*.log
+
+# ===== PYTHON =====
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+.eggs/
+
+# ===== NODE (frontend) — build-ul dist/ SE comite (rulare fără node) =====
+node_modules/
+
+# ===== IDE / OS =====
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Documente de lucru personale (alegerea ta — nu merg pe GitHub) =====
+plan.md
+plan.html
+PIPELINE_NOTES.md
+lip-reading-ghid.html
+pics/
+prototypes/
+untagged_titles.txt

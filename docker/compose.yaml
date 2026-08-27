@@ -1,0 +1,80 @@
+# VSR — orchestrarea celor 3 imagini. Rulează DIN rădăcina repo-ului:
+#
+#   docker compose -f docker/compose.yaml --profile ui up -d          # frontend + api
+#   docker compose -f docker/compose.yaml --profile ui --profile worker up -d
+#   docker compose -f docker/compose.yaml --profile refiner up refiner # rulare de noapte
+#   docker compose -f docker/compose.yaml pull                         # de pe registry
+#
+# .env (din .env.example): HF_TOKEN, VSR_UI_PORT, IMAGE_PREFIX, TAG, GIT_SHA.
+# Datele NU trăiesc în imagini: ./data ./models ./config sunt volume locale.
+# ATENȚIE (Windows): plafonează RAM-ul WSL2 în %UserProfile%\.wslconfig
+#   [wsl2]
+#   memory=8GB
+
+name: vsr
+
+services:
+  frontend:
+    image: ${IMAGE_PREFIX:-vsr}-frontend:${TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/frontend.Dockerfile
+    ports:
+      - "${VSR_UI_PORT:-8080}:80"
+    volumes:
+      - ../data:/data:ro                  # /media direct de pe disc, read-only
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: [ui]
+
+  api:
+    image: ${IMAGE_PREFIX:-vsr}-api:${TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-}
+    expose:
+      - "8000"                            # doar în rețeaua compose — nginx e ușa
+    volumes:
+      - ../data:/app/data
+      - ../config:/app/config:ro
+    environment:
+      GIT_SHA: ${GIT_SHA:-}
+    restart: unless-stopped
+    profiles: [ui]
+
+  worker:
+    image: ${IMAGE_PREFIX:-vsr}-worker:${TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/worker.Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-}
+    gpus: all                             # cere nvidia-container-toolkit
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+      # rw (nu :ro): `fetch_models.py --pin` scrie hash-urile în config/models.yaml
+      - ../config:/app/config
+    environment:
+      GIT_SHA: ${GIT_SHA:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+    restart: unless-stopped
+    profiles: [worker]
+
+  # review_assistant / transcript_refiner — aceeași imagine ca workerul,
+  # altă comandă; pornit manual, de regulă noaptea, când pipeline-ul stă.
+  refiner:
+    image: ${IMAGE_PREFIX:-vsr}-worker:${TAG:-latest}
+    command: ["python", "backend/services/transcript_refiner/main.py"]
+    gpus: all
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+      - ../config:/app/config:ro
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    profiles: [refiner]

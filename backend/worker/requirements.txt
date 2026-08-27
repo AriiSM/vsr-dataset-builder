@@ -1,0 +1,6 @@
+# worker — consumatorul cozii (imaginea vsr-worker).
+# Rulează pipeline-ul IN-PROCESS: are nevoie de TOT stack-ul de modele —
+# instalează requirements.txt din rădăcina repo-ului (torch, whisperx,
+# retinaface, TalkNet vendorizat etc.). Aici doar ce adaugă workerul:
+loguru>=0.7
+pyyaml>=6.0

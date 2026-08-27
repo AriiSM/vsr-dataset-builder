@@ -1,0 +1,20 @@
+# downloader — maximum-quality YouTube download with CC filtering  [CPU/network]
+#
+# Class → dependency map:
+#   YouTubeDownloader (youtube_downloader.py)
+#     yt-dlp          — download engine (formats, merge, anti-bot n-challenge)
+#     imageio-ffmpeg  — bundled ffmpeg binary (stream merge + lossless remux)
+#     loguru          — logging
+#
+# SYSTEM requirements (not pip-installable):
+#   ffprobe — used by the post-download integrity check. imageio-ffmpeg
+#             bundles only ffmpeg, NOT ffprobe → install ffmpeg system-wide
+#             (Windows: winget install ffmpeg · macOS: brew install ffmpeg)
+#             so ffprobe is on PATH. Missing ffprobe raises a clear
+#             RuntimeError instead of failing every video.
+#   node / deno — a JavaScript runtime for YouTube's "n challenge"
+#             (auto-detected; node is usually already present on Windows).
+
+yt-dlp>=2024.1
+imageio-ffmpeg>=0.4
+loguru>=0.7
