@@ -533,7 +533,7 @@ def cmd_bulk_import(args):
     # Load pipeline just to get a ready-to-use downloader with correct config
     pipeline = VSRPipeline.from_config(args.config)
     _apply_cookie_overrides(pipeline, args)
-    downloader: YouTubeDownloader = pipeline.downloader
+    downloader: YouTubeDownloader = pipeline.services.downloader
 
     df = pd.read_csv(csv_path)
     existing_ids = set(df["video_id"].astype(str).tolist()) if "video_id" in df.columns else set()
