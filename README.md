@@ -236,6 +236,7 @@ python backend/run_worker.py             # alt terminal (doar cu stack-ul comple
 | WSL2 mănâncă RAM | `.wslconfig` cu `memory=8GB` (pasul 1) + restart Docker Desktop |
 | `zsh: command not found: python` (nativ, macOS) | folosește `python3` sau activează venv-ul |
 | worker crash-loop: `unable to open database file` | închide DB Browser (redeschide-l DOAR „Read Only"); dacă persistă: `docker compose ... down`, șterge `data\catalog\dataset.db-wal` și `.db-shm` dacă există, pornește workerul primul |
+| worker/api pică la pornire: `sqlite3.OperationalError: disk I/O error` (la `PRAGMA journal_mode`) | celălalt container a apucat baza în WAL — pe bind-mount WAL nu se poate partaja între containere; `git pull` + `build` (compose setează `VSR_SQLITE_JOURNAL=delete` pentru toate serviciile); apoi `down`, șterge `data\catalog\dataset.db-wal` și `.db-shm` dacă există, `up -d` |
 | `attempt to write a readonly database` | imagine veche (api rula ne-root) — `git pull` + `build` |
 | aceeași eroare și după „fix" | ai sărit o verigă: `git pull` → verifică fix-ul în fișier (`findstr`) → `build` → `up` |
 | jurnalul DB e `delete`, nu `wal` (doctor) | normal pe bind-mount Windows — fallback automat, zero impact |

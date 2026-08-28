@@ -43,6 +43,8 @@ services:
       - ../config:/app/config:ro
     environment:
       GIT_SHA: ${GIT_SHA:-}
+      # bind-mount partajat între containere: WAL e INTERZIS (vezi catalog_db)
+      VSR_SQLITE_JOURNAL: delete
     restart: unless-stopped
     profiles: [ui]
 
@@ -62,6 +64,7 @@ services:
     environment:
       GIT_SHA: ${GIT_SHA:-}
       HF_TOKEN: ${HF_TOKEN:-}
+      VSR_SQLITE_JOURNAL: delete
     restart: unless-stopped
     profiles: [worker]
 
@@ -77,4 +80,5 @@ services:
       - ../config:/app/config:ro
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
+      VSR_SQLITE_JOURNAL: delete
     profiles: [refiner]

@@ -28,6 +28,7 @@ Design rules:
 """
 
 import json
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -228,19 +229,27 @@ class CatalogDatabase:
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=check_same_thread)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
-            # WAL needs shared memory (the -shm file, via mmap) — impossible
-            # across containers on Windows bind mounts (9p/gRPC-FUSE). Fall
-            # back to the classic rollback journal: no shared memory needed,
-            # and busy_timeout absorbs our low write rate just fine.
-            self._conn.close()
-            self._conn = sqlite3.connect(str(self.db_path),
-                                         check_same_thread=check_same_thread)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA busy_timeout=5000")
+        # WAL needs shared memory (the -shm file, via mmap) — impossible
+        # ACROSS containers on Windows bind mounts (9p/gRPC-FUSE). Worse, the
+        # try-WAL-then-fallback dance only works for the FIRST process to open
+        # the file: once one container holds the DB in WAL, a second one can
+        # neither join the WAL nor switch it to DELETE (needs exclusive
+        # access) — both raise "disk I/O error". So on shared bind mounts
+        # NOBODY may attempt WAL: compose sets VSR_SQLITE_JOURNAL=delete for
+        # every service. Native (single-machine) runs keep WAL by default.
+        journal = os.environ.get("VSR_SQLITE_JOURNAL", "wal").strip().lower()
+        if journal == "delete":
             self._conn.execute("PRAGMA journal_mode=DELETE")
+        else:
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                self._conn.close()
+                self._conn = sqlite3.connect(str(self.db_path),
+                                             check_same_thread=check_same_thread)
+                self._conn.row_factory = sqlite3.Row
+                self._conn.execute("PRAGMA busy_timeout=5000")
+                self._conn.execute("PRAGMA journal_mode=DELETE")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
 
