@@ -1,17 +1,14 @@
 """
 Catalog writer — everything the pipeline records about videos and segments.
 
-Storage v2 (Faza 6.5): the AUTHORITATIVE store is data/catalog/dataset.db
-(vsr_shared.catalog_db) — written automatically, transaction per clip.
-videos_master.csv / segments_index.csv are best-effort MIRRORS kept only
-until the FastAPI frontend reads the DB directly; a failed mirror write is
-logged and skipped (regenerate any time with backend/tools/export_catalog.py).
-The Windows pending-updates queue is GONE — it existed only because Excel
-locks CSVs; SQLite has no such problem.
+Storage v2, final form: dataset.db is the ONLY store — written automatically,
+one transaction per clip. CSVs exist exclusively as on-demand exports
+(backend/tools/export_catalog.py); nothing here writes or reads them.
 
 Public API (call sites in pipeline.py unchanged):
-    set_video_status · read_master_for_edit · update_for_result ·
-    segment_to_row · append_segment · rewrite_segments_for · sync_from_disk
+    set_video_status · update_for_result · append_segment ·
+    record_dropped_clip · store_segment_embedding · rewrite_segments_for ·
+    sync_from_disk
 """
 
 import json
@@ -21,7 +18,6 @@ from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
-import pandas as pd
 from loguru import logger
 
 from orchestrator.checkpoint_store import CheckpointStore
@@ -32,13 +28,6 @@ from vsr_shared.catalog_db import CatalogDatabase
 from vsr_shared.excel_schema import ProcessingStatus
 
 
-def _nan_to_blank(value: float):
-    """CSV representation for optional floats: NaN → empty cell, else rounded."""
-    if value is None or (isinstance(value, float) and math.isnan(value)):
-        return ""
-    return round(float(value), 4)
-
-
 def _nan_to_none(value):
     """DB representation for optional floats: NaN → NULL."""
     if value is None or (isinstance(value, float) and math.isnan(value)):
@@ -47,7 +36,7 @@ def _nan_to_none(value):
 
 
 class CatalogWriter:
-    """Persists per-video status and per-segment rows: DB first, CSV mirror."""
+    """Persists per-video status and per-segment rows into dataset.db."""
 
     def __init__(self, config: PipelineConfig, checkpoints: CheckpointStore):
         self.config = config
@@ -60,7 +49,6 @@ class CatalogWriter:
     def set_video_status(self, video_id: str, status: ProcessingStatus):
         """Update a video's status (DB authoritative + CSV mirror)."""
         self.db.videos.set_status(video_id, status.value)
-        self._mirror_master_status(video_id, status.value)
 
     def update_for_result(self, result: ProcessingResult):
         """Record a finished video: stats on the video row + segment rows."""
@@ -79,61 +67,9 @@ class CatalogWriter:
         self.db.videos.update_fields(result.video_id, fields)
 
         self.rewrite_segments_for(result)
-        self._mirror_master_result(result, fields)
         self._backup_database()
 
-    @staticmethod
-    def read_master_for_edit(excel_path: Path) -> "pd.DataFrame":
-        """Read videos_master.csv with string-ish columns coerced to object.
-
-        Batch selection still reads the CSV the curator edits; rows are
-        merged into the DB by import_videos / as each video is processed.
-        """
-        df = pd.read_csv(excel_path)
-        for col in df.select_dtypes(include=["float64", "object"]).columns:
-            df[col] = df[col].astype(object)
-        return df
-
     # ---------------------------------------------------------- segment rows
-
-    @staticmethod
-    def segment_to_row(seg: ExportedSegment) -> dict:
-        """CSV-shaped row for one exported segment (mirror + exports)."""
-        return {
-            "segment_id": seg.segment_id,
-            "video_id": seg.video_id,
-            "start_time": seg.start_time,
-            "end_time": seg.end_time,
-            "duration": seg.duration,
-            "text": seg.text,
-            "num_words": seg.num_words,
-            "num_chars": len(seg.text) if seg.text else 0,
-            "speaker_id": seg.speaker_id or f"{seg.video_id}_spk0",
-            "track_id": seg.track_id,
-            "asd_score": seg.asd_score,
-            "syncnet_conf": seg.syncnet_confidence,
-            "whisper_conf": seg.whisper_confidence,
-            "original_text": seg.text,
-            "wer": 0.0,
-            "wer_word_count_ref": seg.num_words,
-            "face_bbox": seg.face_bbox,
-            "face_visibility_ratio": round(seg.face_visibility_ratio, 4),
-            "head_pose_avg": seg.head_pose_avg,
-            "mouth_landmark_fail_rate": round(seg.mouth_landmark_fail_rate, 4),
-            "mouth_roi_method": seg.mouth_roi_method,
-            "whisper_conf_min": _nan_to_blank(seg.whisper_conf_min),
-            "whisper_conf_p25": _nan_to_blank(seg.whisper_conf_p25),
-            "asd_method": seg.asd_method,
-            "syncnet_method": seg.syncnet_method,
-            "quality_tier": seg.quality_tier,
-            "audio_speaker_label": seg.audio_speaker_label,
-            "av_speaker_mismatch": (
-                "" if seg.av_speaker_mismatch is None else bool(seg.av_speaker_mismatch)
-            ),
-            "video_path": str(seg.video_path) if seg.video_path else "",
-            "annotation_path": str(seg.annotation_path) if seg.annotation_path else "",
-            "split": "",
-        }
 
     @staticmethod
     def segment_to_db_row(seg: ExportedSegment) -> dict:
@@ -199,16 +135,6 @@ class CatalogWriter:
             self.segment_to_db_row(seg),
             words=self._words_from_annotation(seg),
         )
-        # CSV mirror (append) — best-effort.
-        index_path = self.config.metadata_dir / "segments_index.csv"
-        try:
-            new_df = pd.DataFrame([self.segment_to_row(seg)])
-            if index_path.exists() and index_path.stat().st_size > 0:
-                new_df.to_csv(index_path, mode="a", header=False, index=False)
-            else:
-                new_df.to_csv(index_path, index=False)
-        except Exception as e:
-            logger.debug(f"segments_index mirror skipped: {e}")
 
     def record_dropped_clip(self, video_id: str, clip, reason: str,
                             face_visibility: Optional[float] = None):
@@ -241,43 +167,21 @@ class CatalogWriter:
             [self.segment_to_db_row(seg) for seg in result.segments],
         )
 
-        # CSV mirror (rewrite this video's rows) — best-effort.
-        index_path = self.config.metadata_dir / "segments_index.csv"
-        try:
-            new_df = pd.DataFrame(
-                [self.segment_to_row(seg) for seg in result.segments])
-            if index_path.exists():
-                existing = pd.read_csv(index_path)
-                existing = existing[
-                    existing["video_id"].astype(str) != result.video_id]
-                combined = pd.concat([existing, new_df], ignore_index=True)
-            else:
-                combined = new_df
-            combined.to_csv(index_path, index=False)
-        except Exception as e:
-            logger.warning(
-                f"segments_index mirror failed ({e}) — regenerate with "
-                "backend/tools/export_catalog.py")
 
     # -------------------------------------------------------------- sync
 
     def sync_from_disk(
         self,
-        excel_path: Path,
+        excel_path: Optional[Path] = None,
         video_ids: Optional[List[str]] = None,
     ) -> int:
-        """Rebuild video stats for completed videos whose metadata is missing,
-        from the DB (primary) or the files on disk (fallback), then update
-        the DB video rows + the CSV mirror.
+        """Rebuild video stats for videos whose metadata is missing, from the
+        segments table (primary) or the files on disk (fallback), writing the
+        video rows in dataset.db. `excel_path` is accepted for call-site
+        compatibility and IGNORED — CSVs are exports only (export_catalog.py).
 
         Returns the number of rows updated.
         """
-        if not excel_path.exists():
-            logger.error(f"CSV not found: {excel_path}")
-            return 0
-
-        df = self.read_master_for_edit(excel_path)
-
         review_status: dict = {}
         review_path = self.config.metadata_dir / "review_status.json"
         if review_path.exists():
@@ -286,15 +190,16 @@ class CatalogWriter:
             except Exception as e:
                 logger.warning(f"Could not parse {review_path}: {e}")
 
+        all_rows = self.db.videos.all()
         if video_ids:
-            rows_to_check = df[df["video_id"].astype(str).isin(video_ids)]
+            wanted = {str(v) for v in video_ids}
+            rows_to_check = [r for r in all_rows if str(r["video_id"]) in wanted]
         else:
-            rows_to_check = df[
-                df["total_segments"].isna() | (df["total_segments"] == 0)
-            ]
+            rows_to_check = [r for r in all_rows
+                             if not r.get("total_segments")]
 
         updated = 0
-        for _, row in rows_to_check.iterrows():
+        for row in rows_to_check:
             vid = str(row["video_id"])
             proc_dir = self.config.processed_dir / vid / "face_crop"
             video_files = sorted(proc_dir.glob("*.mp4")) if proc_dir.exists() else []
@@ -326,11 +231,6 @@ class CatalogWriter:
                 fields["avg_syncnet_conf"] = round(avg_sync, 3)
             self.db.videos.update_fields(vid, fields)
 
-            mask = df["video_id"].astype(str) == vid
-            idx = df.index[mask][0]
-            for key, value in fields.items():
-                df.loc[idx, key] = value
-
             logger.info(
                 f"  {vid}: {total_segments} segments, {total_duration:.1f}s"
                 + (f", asd={avg_asd:.2f}" if avg_asd is not None else "")
@@ -338,14 +238,7 @@ class CatalogWriter:
             updated += 1
 
         if updated:
-            try:
-                df.to_csv(excel_path, index=False)
-                logger.info(f"sync: updated {updated} row(s)")
-            except PermissionError:
-                logger.warning(
-                    "CSV mirror is open — DB updated; regenerate the CSV with "
-                    "backend/tools/export_catalog.py")
-
+            logger.info(f"sync: updated {updated} video row(s) in dataset.db")
         return updated
 
     def _stats_from_disk(self, vid: str, video_files: List[Path]):
@@ -388,49 +281,6 @@ class CatalogWriter:
             ):
                 return "validated"
         return "completed"
-
-    # ------------------------------------------------------------- mirrors
-
-    def _mirror_master_status(self, video_id: str, status: str):
-        csv_path = self.config.metadata_dir / "videos_master.csv"
-        if not csv_path.exists():
-            return
-        try:
-            df = pd.read_csv(csv_path)
-            df = df.astype(object)
-            mask = df["video_id"].astype(str) == video_id
-            if not mask.any():
-                new_row = {col: "" for col in df.columns}
-                new_row["video_id"] = video_id
-                new_row["status"] = status
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            else:
-                df.loc[mask, "status"] = status
-            df.to_csv(csv_path, index=False)
-        except Exception as e:
-            logger.debug(f"master mirror status skipped: {e}")
-
-    def _mirror_master_result(self, result: ProcessingResult, fields: dict):
-        csv_path = self.config.metadata_dir / "videos_master.csv"
-        if not csv_path.exists():
-            return
-        try:
-            df = self.read_master_for_edit(csv_path)
-            mask = df["video_id"].astype(str) == result.video_id
-            if not mask.any():
-                new_row = {col: "" for col in df.columns}
-                new_row["video_id"] = result.video_id
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                mask = df["video_id"].astype(str) == result.video_id
-            idx = df.index[mask][0]
-            for key, value in fields.items():
-                if key in df.columns:
-                    df.loc[idx, key] = value
-            df.to_csv(csv_path, index=False)
-        except Exception as e:
-            logger.warning(
-                f"master mirror failed ({e}) — DB updated; regenerate the CSV "
-                "with backend/tools/export_catalog.py")
 
     def _backup_database(self):
         """Online backup after each finished video, keep the last 5."""

@@ -10,10 +10,10 @@ Usage:
     python backend/orchestrator/cli.py single ro_001 "https://youtube.com/watch?v=..."
 
     # Process batch from Excel
-    python backend/orchestrator/cli.py batch data/catalog/videos_master.csv --limit 10
+    python backend/orchestrator/cli.py batch --limit 10
 
     # Show stats
-    python backend/orchestrator/cli.py stats data/catalog/videos_master.csv
+    python backend/orchestrator/cli.py stats
 """
 
 import argparse
@@ -159,16 +159,15 @@ def cmd_resume(args):
         config_path = Path(args.config)
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
-        excel_path = (
-            Path(cfg["paths"]["base_dir"]) / "catalog" / "videos_master.csv"
-        )
-        if excel_path.exists():
-            df = pd.read_csv(excel_path)
-            row = df[df["video_id"].astype(str) == args.video_id]
-            if not row.empty:
-                url = str(row.iloc[0].get("youtube_url", ""))
+        from vsr_shared.catalog_db import CatalogDatabase
+        db = CatalogDatabase(
+            Path(cfg["paths"]["base_dir"]) / "catalog" / "dataset.db")
+        row = db.videos.get(args.video_id)
+        db.close()
+        if row:
+            url = str(row.get("youtube_url") or "")
     if not url:
-        print(f"Error: could not find a URL for '{args.video_id}' in the master CSV.")
+        print(f"Error: could not find a URL for '{args.video_id}' in the catalog.")
         sys.exit(1)
 
     pipeline = VSRPipeline.from_config(args.config)
@@ -225,20 +224,15 @@ def cmd_sync_excel(args):
     """Rebuild Excel stats from segments on disk (no reprocessing)."""
     from orchestrator.pipeline import VSRPipeline
 
-    excel_path = Path(args.excel)
-    if not excel_path.exists():
-        print(f"Error: Excel file not found: {excel_path}")
-        sys.exit(1)
-
+    # args.excel acceptat pentru compatibilitate — IGNORAT (DB e sursa)
     pipeline = VSRPipeline.from_config(args.config)
     updated = pipeline.sync_excel_from_disk(
-        excel_path,
         video_ids=args.video_id or None,
     )
 
     print(f"\n{'='*50}")
     if updated:
-        print(f"Updated {updated} video(s) in the Excel.")
+        print(f"Updated {updated} video row(s) in dataset.db.")
     else:
         print("Nothing to update - all matching rows already have stats, "
               "or no segment files were found.")
@@ -261,26 +255,30 @@ def cmd_stats(args):
     import pandas as pd
     import yaml
 
-    excel_path = Path(args.excel)
-    if not excel_path.exists():
-        print(f"Error: CSV file not found: {excel_path}")
-        sys.exit(1)
+    # args.excel acceptat pentru compatibilitate — IGNORAT (DB e sursa)
 
-    df = pd.read_csv(excel_path)
-
+    # Storage v2 final: everything reads dataset.db (CSVs are exports only).
     config_path = Path(args.config)
     base_dir = Path(".")
     if config_path.exists():
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
         base_dir = Path(cfg["paths"]["base_dir"])
-
     metadata_dir = base_dir / "catalog"
-    seg_path = metadata_dir / "segments_index.csv"
-    speakers_path = metadata_dir / "speakers_registry.csv"
 
-    seg_df = pd.read_csv(seg_path) if seg_path.exists() else pd.DataFrame()
-    speakers_df = pd.read_csv(speakers_path) if speakers_path.exists() else pd.DataFrame()
+    from vsr_shared.catalog_db import CatalogDatabase
+    db = CatalogDatabase(metadata_dir / "dataset.db")
+    df = pd.DataFrame(db.videos.all())
+    seg_rows = db.connection.execute(
+        "SELECT s.*, COALESCE(NULLIF(v.region, ''), 'UNKNOWN') AS region"
+        " FROM segments s LEFT JOIN videos v USING (video_id)"
+        " WHERE COALESCE(s.review_status, '') != 'rejected'").fetchall()
+    seg_df = pd.DataFrame([dict(r) for r in seg_rows])
+    speakers_rows = db.speakers.all_with_stats()
+    for r in speakers_rows:
+        r.pop("centroid", None)
+    speakers_df = pd.DataFrame(speakers_rows)
+    db.close()
 
     # ── Section 1: Videos by status ────────────────────────────────────
     n_videos = len(df)
@@ -490,14 +488,45 @@ def cmd_stats(args):
             print(f"  {k:8s} {v}")
 
 
-def cmd_bulk_import(args):
-    """Download a list of YouTube URLs and add rows to videos_master.csv.
+def parse_import_line(entry: str):
+    """One bulk-import line → (video_id | None, url | None).
 
-    For each URL:
-      - Assigns next video_id using the given prefix
-      - Downloads via yt-dlp (honors CC check / cookies from CLI flags)
-      - On success: appends row with status='pending', filled metadata
-      - On failure: appends row with status='failed' and error_message
+    Formats:  "https://..."            → (None, url)      classic
+              "md_001 https://..."     → ("md_001", url)  pre-downloaded
+    Returns (None, None) for an unrecognized line.
+    """
+    import re as _re
+    parts = entry.split()
+    if len(parts) == 1 and "://" in parts[0]:
+        return None, parts[0]
+    if (len(parts) == 2 and "://" in parts[1]
+            and _re.fullmatch(r"[A-Za-z0-9][\w-]*", parts[0])):
+        return parts[0], parts[1]
+    return None, None
+
+
+def _upsert_video_row(pipeline, video_id: str, row: dict) -> None:
+    """Mirror one registered video into dataset.db (videos table)."""
+    try:
+        fields = {k: v for k, v in row.items() if v not in ("", None)}
+        pipeline.catalog.db.videos.ensure_exists(video_id)
+        pipeline.catalog.db.videos.update_fields(video_id, fields)
+    except Exception as e:
+        logger.debug(f"DB upsert skipped for {video_id}: {e}")
+
+
+def cmd_bulk_import(args):
+    """Register a list of YouTube URLs: download (or map) + add catalog rows.
+
+    Two line formats, auto-detected:
+      "https://..."           classic — next {prefix}_NNN id + download;
+      "md_001 https://..."    pre-downloaded — uses the GIVEN id; when
+                              data/raw/{id}.mp4 exists, NO download happens:
+                              metadata is fetched from the link, the raw file
+                              is integrity-checked with ffprobe (duration vs
+                              metadata), and the row is registered pending.
+    --pre-downloaded makes the pair format MANDATORY (strict validation).
+    Rows land in dataset.db (CSVs are exports only).
     """
     import re
     import pandas as pd
@@ -520,11 +549,6 @@ def cmd_bulk_import(args):
         print("No URLs provided. Pass --urls ... or --from-file <path>.")
         sys.exit(1)
 
-    csv_path = Path(args.excel)
-    if not csv_path.exists():
-        print(f"CSV not found: {csv_path} — run `init` first.")
-        sys.exit(1)
-
     prefix = args.prefix or "vid"
     region = args.region or "UNKNOWN"
     source = args.source or "YouTube_CC"
@@ -535,9 +559,10 @@ def cmd_bulk_import(args):
     _apply_cookie_overrides(pipeline, args)
     downloader: YouTubeDownloader = pipeline.services.downloader
 
-    df = pd.read_csv(csv_path)
-    existing_ids = set(df["video_id"].astype(str).tolist()) if "video_id" in df.columns else set()
-    existing_urls = set(df["youtube_url"].astype(str).tolist()) if "youtube_url" in df.columns else set()
+    # Sursa de adevăr: tabela videos din dataset.db (CSV-urile sunt exporturi).
+    db_rows = pipeline.catalog.db.videos.all()
+    existing_ids = {str(r["video_id"]) for r in db_rows}
+    existing_urls = {str(r.get("youtube_url") or "") for r in db_rows} - {""}
 
     # Build a set of YouTube video IDs already in the CSV so we can dedup
     # across URL variants (watch?v=, youtu.be/, with-or-without-www,
@@ -560,14 +585,27 @@ def cmd_bulk_import(args):
     next_num = (max(used_nums) + 1) if used_nums else 1
 
     total = len(urls)
-    added, failed, skipped = 0, 0, 0
+    added, failed, skipped, registered = 0, 0, 0, 0
 
     # Track IDs we imported in this run so duplicate URLs inside the same
     # input list are also caught.
     imported_yt_ids: set = set()
 
-    for i, url in enumerate(urls, 1):
-        logger.info(f"[{i}/{total}] Importing: {url}")
+    strict_pairs = bool(getattr(args, "pre_downloaded", False))
+    for i, entry in enumerate(urls, 1):
+        given_id, url = parse_import_line(entry)
+        if url is None or (strict_pairs and given_id is None):
+            expected = "'md_001 https://...'" if strict_pairs else "'URL' sau 'id URL'"
+            logger.error(f"  Linie nerecunoscută (aștept {expected}): {entry!r}")
+            failed += 1
+            continue
+        logger.info(f"[{i}/{total}] Importing: {url}"
+                    + (f" (id dat: {given_id})" if given_id else ""))
+
+        if given_id and given_id in existing_ids:
+            logger.warning(f"  {given_id} e deja înregistrat — sărit")
+            skipped += 1
+            continue
 
         # Normalize: extract the 11-char YouTube ID. Any URL variant that
         # points to the same video will yield the same ID → reliable dedup.
@@ -588,15 +626,15 @@ def cmd_bulk_import(args):
             skipped += 1
             continue
 
-        video_id = f"{prefix}_{next_num:03d}"
-        while video_id in existing_ids:
-            next_num += 1
+        if given_id:
+            video_id = given_id
+        else:
             video_id = f"{prefix}_{next_num:03d}"
+            while video_id in existing_ids:
+                next_num += 1
+                video_id = f"{prefix}_{next_num:03d}"
 
-        row = {col: "" for col in df.columns}
-        for col in VIDEOS_MASTER_SCHEMA.keys():
-            if col not in row:
-                row[col] = ""
+        row = {col: "" for col in VIDEOS_MASTER_SCHEMA.keys()}
         row["video_id"] = video_id
         row["youtube_url"] = url
         row["region"] = region
@@ -616,6 +654,35 @@ def cmd_bulk_import(args):
                 row["license"] = "CC-BY"
         except Exception as e:
             logger.warning(f"  metadata fetch failed: {e}")
+
+        # ── Pre-downloaded raw on disk? Map it: metadata is already fetched
+        # above; verify the FILE (ffprobe: streams + duration vs metadata) so
+        # a corrupt copy is caught NOW, not mid-pipeline. No download.
+        raw_path = downloader.output_dir / f"{video_id}.mp4"
+        if raw_path.exists():
+            expected = None
+            try:
+                expected = float(info_obj.duration) if info_obj and info_obj.duration else None
+            except (TypeError, ValueError):
+                expected = None
+            try:
+                properties = downloader._probe_video(raw_path, expected)
+                row["status"] = ProcessingStatus.PENDING.value
+                added += 1
+                registered += 1
+                logger.info(f"  {video_id}: raw pe disc, integritate OK "
+                            f"[{properties}] — fără descărcare → pending")
+            except Exception as e:
+                row["status"] = ProcessingStatus.FAILED.value
+                row["error_message"] = f"raw file failed integrity check: {e}"[:500]
+                failed += 1
+                logger.error(f"  {video_id}: raw pe disc dar PICĂ verificarea "
+                             f"ffprobe ({e}) — marcat failed, fișierul rămâne")
+            _upsert_video_row(pipeline, video_id, row)
+            existing_ids.add(video_id)
+            existing_urls.add(url)
+            imported_yt_ids.add(yt_id)
+            continue
 
         # ── Download — `verify_cc=True` also runs CC check, which succeeds
         # only for CC videos. A successful download under verify_cc=True
@@ -642,13 +709,13 @@ def cmd_bulk_import(args):
             failed += 1
             logger.error(f"  {video_id} download error: {e}")
 
-        # Append row to CSV immediately so the UI can reflect progress in real time
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        df.to_csv(csv_path, index=False)
+        # Row-ul intră imediat în DB — UI-ul îl vede în timp real
+        _upsert_video_row(pipeline, video_id, row)
         existing_ids.add(video_id)
         existing_urls.add(url)
         imported_yt_ids.add(yt_id)
-        next_num += 1
+        if not given_id:
+            next_num += 1
 
     print(f"\n{'='*50}")
     print(f"Bulk import summary")
@@ -656,125 +723,12 @@ def cmd_bulk_import(args):
     print(f"  Downloaded     : {added}")
     print(f"  Failed         : {failed}")
     print(f"  Skipped (dup.) : {skipped}")
-    print(f"  CSV updated    : {csv_path}")
+    print(f"  Pre-downloaded : {registered}  (mapate fără descărcare)")
+    print(f"  Catalog        : dataset.db (CSV doar prin export_catalog.py)")
 
-
-def cmd_backfill_speakers(args):
-    """Populate speaker_id={video_id}_spk0 for legacy segments + refresh registry.
-
-    Older segments (exported before speaker_id became part of the pipeline)
-    have an empty speaker_id in segments_index.csv. Without it, the speakers
-    registry never gets aggregates and the Stats panel stays empty.
-
-    This command:
-      1. Reads segments_index.csv.
-      2. For every row with a missing/empty speaker_id, fills in a default
-         "{video_id}_spk0" (single-speaker assumption). Rows that already
-         have a speaker_id are left untouched (idempotent).
-      3. Mirrors the speaker_id into videos_master.csv so the master table
-         stays consistent with the segments index.
-      4. Calls ensure_speaker_exists() so each speaker has a stub row in
-         the registry (curator can later fill in name/gender/age/accent).
-      5. Runs recompute_aggregates() so the Stats tab shows real numbers.
-
-    Use --video-id to limit scope; --dry-run to preview without writing.
-    """
-    import pandas as pd
-    import yaml
-    from vsr_shared.speakers_registry import ensure_speaker_exists, recompute_aggregates
-
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print(f"Error: config not found: {config_path}")
-        sys.exit(1)
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
-    metadata_dir = Path(cfg["paths"]["base_dir"]) / "catalog"
-
-    seg_csv = metadata_dir / "segments_index.csv"
-    master_csv = metadata_dir / "videos_master.csv"
-    if not seg_csv.exists():
-        print(f"Error: {seg_csv} not found")
-        sys.exit(1)
-
-    # ── 1+2: scan segments_index, fill missing speaker_id ──────────────
-    seg_df = pd.read_csv(seg_csv)
-    if "speaker_id" not in seg_df.columns:
-        seg_df["speaker_id"] = ""
-    seg_df["speaker_id"] = seg_df["speaker_id"].fillna("").astype(str)
-
-    target_mask = (seg_df["speaker_id"] == "") | (seg_df["speaker_id"].str.lower() == "nan")
-    if args.video_id:
-        target_mask &= seg_df["video_id"].astype(str).isin(args.video_id)
-
-    n_target = int(target_mask.sum())
-    n_already = int(len(seg_df) - target_mask.sum())
-
-    if n_target == 0:
-        print(f"All {len(seg_df)} segments already have speaker_id — nothing to backfill.")
-        # Still refresh aggregates: maybe the registry itself is stale.
-        if not args.dry_run:
-            recompute_aggregates(metadata_dir)
-        return
-
-    # Compute the assigned id per row: "{video_id}_spk0".
-    new_ids = seg_df.loc[target_mask, "video_id"].astype(str) + "_spk0"
-    speakers_to_create = sorted(set(new_ids.tolist()))
-
-    print(f"Backfill plan:")
-    print(f"  segments to update: {n_target}  (already populated: {n_already})")
-    print(f"  unique speakers to create/touch: {len(speakers_to_create)}")
-    if args.video_id:
-        print(f"  scope limited to video_id(s): {args.video_id}")
-
-    if args.dry_run:
-        print("\n(--dry-run: no files written)")
-        # Show first 5 sample mappings.
-        for sid in speakers_to_create[:5]:
-            print(f"    will create stub: {sid}")
-        if len(speakers_to_create) > 5:
-            print(f"    ... and {len(speakers_to_create) - 5} more")
-        return
-
-    # ── Write segments_index ───────────────────────────────────────────
-    seg_df.loc[target_mask, "speaker_id"] = new_ids
-    seg_df.to_csv(seg_csv, index=False)
-    print(f"Updated {n_target} rows in {seg_csv.name}")
-
-    # ── 3: mirror into videos_master ───────────────────────────────────
-    if master_csv.exists():
-        try:
-            mdf = pd.read_csv(master_csv)
-            for col in mdf.select_dtypes(include=["float64", "object"]).columns:
-                mdf[col] = mdf[col].astype(object)
-            if "speaker_id" not in mdf.columns:
-                mdf["speaker_id"] = ""
-            mdf["speaker_id"] = mdf["speaker_id"].fillna("").astype(str)
-
-            # For every video in scope, set its master speaker_id if empty.
-            for vid in seg_df.loc[target_mask, "video_id"].astype(str).unique():
-                m_mask = mdf["video_id"].astype(str) == vid
-                if m_mask.any():
-                    cur = str(mdf.loc[m_mask, "speaker_id"].iloc[0]).strip()
-                    if cur == "" or cur.lower() == "nan":
-                        mdf.loc[m_mask, "speaker_id"] = f"{vid}_spk0"
-            mdf.to_csv(master_csv, index=False)
-            print(f"Mirrored speaker_id into {master_csv.name}")
-        except PermissionError:
-            print(f"WARNING: {master_csv.name} is open — skipped master mirror.")
-
-    # ── 4+5: registry stubs + aggregates ───────────────────────────────
-    for sid in speakers_to_create:
-        ensure_speaker_exists(metadata_dir, sid)
-    print(f"Ensured {len(speakers_to_create)} speaker(s) in registry")
-
-    n_updated = recompute_aggregates(metadata_dir)
-    print(f"Aggregated {n_updated} speaker row(s) in registry")
-    print(f"\nDone. Refresh the Stats tab to see the speakers panel populated.")
 
 
 def cmd_init(args):
-    from vsr_shared.excel_schema import create_empty_videos_master, create_empty_segments_index
 
     base_dir = Path(args.base_dir)
 
@@ -799,17 +753,9 @@ def cmd_init(args):
     CatalogDatabase(base_dir / "catalog" / "dataset.db").close()
     print(f"Created: {base_dir / 'catalog' / 'dataset.db'} (schema v2)")
 
-    excel_path = base_dir / "catalog" / "videos_master.csv"
-    if not excel_path.exists() or args.force:
-        create_empty_videos_master(excel_path)
-        print(f"Created: {excel_path}")
-    else:
-        print(f"Exists:  {excel_path} (use --force to overwrite)")
 
-    segments_path = base_dir / "catalog" / "segments_index.csv"
-    if not segments_path.exists() or args.force:
-        create_empty_segments_index(segments_path)
-        print(f"Created: {segments_path}")
+
+
 
     print(f"\nProject initialized at: {base_dir}")
     print(f"Next steps:")
@@ -826,7 +772,7 @@ Examples:
   python backend/orchestrator/cli.py init ./data
   python backend/orchestrator/cli.py single ro_001 "https://youtube.com/watch?v=..."
   python backend/orchestrator/cli.py batch data/catalog/videos_master.csv
-  python backend/orchestrator/cli.py stats data/catalog/videos_master.csv
+  python backend/orchestrator/cli.py stats
         """,
     )
 
@@ -857,7 +803,8 @@ Examples:
 
     # batch
     p_batch = subs.add_parser("batch", help="Process batch from Excel")
-    p_batch.add_argument("excel", help="Path to videos_master.csv")
+    p_batch.add_argument("excel", nargs="?", default="",
+                         help="ignorat — selecția vine din dataset.db")
     p_batch.add_argument("--limit", type=int)
     p_batch.add_argument("--status", nargs="+", default=["pending"])
     p_batch.add_argument(
@@ -879,7 +826,8 @@ Examples:
 
     # stats
     p_stats = subs.add_parser("stats", help="Show dataset statistics")
-    p_stats.add_argument("excel", help="Path to videos_master.csv")
+    p_stats.add_argument("excel", nargs="?", default="",
+                         help="ignorat — statisticile vin din dataset.db")
     p_stats.add_argument("--json", action="store_true",
                          help="Emit machine-readable JSON instead of pretty text.")
 
@@ -899,7 +847,8 @@ Examples:
         "resume-batch",
         help="Resume all interrupted videos (status=processing or failed)",
     )
-    p_resume_batch.add_argument("excel", help="Path to videos_master.csv")
+    p_resume_batch.add_argument("excel", nargs="?", default="",
+                                help="ignorat — selecția vine din dataset.db")
     p_resume_batch.add_argument("--limit", type=int, help="Max videos to resume")
     p_resume_batch.add_argument(
         "--video-id",
@@ -908,12 +857,13 @@ Examples:
         help="Resume only these video IDs (bypasses the status filter)",
     )
 
-    # bulk-import — download a list of YouTube URLs and seed videos_master.csv
+    # bulk-import — download/map a list of YouTube URLs into dataset.db
     p_bulk = subs.add_parser(
         "bulk-import",
-        help="Download many YouTube URLs and add rows to videos_master.csv",
+        help="Download/map YouTube URLs into the catalog (dataset.db)",
     )
-    p_bulk.add_argument("excel", help="Path to videos_master.csv")
+    p_bulk.add_argument("excel", nargs="?", default="",
+                        help="ignorat — rândurile intră în dataset.db")
     p_bulk.add_argument(
         "--urls", nargs="+", metavar="URL",
         help="YouTube URLs to import (one or more)",
@@ -931,6 +881,9 @@ Examples:
                         choices=["TEDx", "YouTube_CC", "Interview", "Lecture",
                                  "Podcast", "News", "Other"],
                         help="Source category (default: YouTube_CC)")
+    p_bulk.add_argument("--pre-downloaded", action="store_true",
+                        help="strict: every line must be 'id URL'; raw files "
+                             "already in data/raw are mapped, not downloaded")
     p_bulk.add_argument("--no-cc-check", action="store_true",
                         help="Skip Creative-Commons license verification")
     p_bulk.add_argument(
@@ -947,29 +900,13 @@ Examples:
         "sync-excel",
         help="Rebuild Excel stats from segment files on disk (no reprocessing)",
     )
-    p_sync.add_argument("excel", help="Path to videos_master.csv")
+    p_sync.add_argument("excel", nargs="?", default="",
+                        help="ignorat — sincronizarea scrie dataset.db")
     p_sync.add_argument(
         "--video-id",
         nargs="+",
         metavar="ID",
         help="Only sync these video IDs (default: all rows missing stats)",
-    )
-
-    # backfill-speakers
-    p_bsp = subs.add_parser(
-        "backfill-speakers",
-        help="Populate speaker_id for legacy segments and refresh the speakers registry",
-    )
-    p_bsp.add_argument(
-        "--video-id",
-        nargs="+",
-        metavar="ID",
-        help="Only backfill these video IDs (default: every segment with empty speaker_id).",
-    )
-    p_bsp.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would change without writing any files.",
     )
 
     args = parser.parse_args()
@@ -996,8 +933,6 @@ Examples:
         cmd_resume_batch(args)
     elif args.command == "bulk-import":
         cmd_bulk_import(args)
-    elif args.command == "backfill-speakers":
-        cmd_backfill_speakers(args)
 
 
 if __name__ == "__main__":

@@ -96,8 +96,10 @@ class JobExecutor:
                 pipeline.config.cookies_from_browser = browser
             pipeline.services.invalidate_downloader()
 
-    def _master_csv(self, pipeline: VSRPipeline) -> Path:
-        return pipeline.config.metadata_dir / "videos_master.csv"
+    @staticmethod
+    def _master_csv(pipeline: VSRPipeline) -> None:
+        """Storage v2 final: selection reads dataset.db — no CSV path."""
+        return None
 
     def _run_single(self, pipeline: VSRPipeline, params: dict):
         pipeline.process_video(
@@ -151,7 +153,6 @@ class JobExecutor:
         cli = Path(__file__).resolve().parent.parent / "orchestrator" / "cli.py"
         cmd = [
             _sys.executable, str(cli), "bulk-import",
-            str(self._master_csv(pipeline)),
             "--prefix", (params.get("prefix") or "vid").strip() or "vid",
             "--region", (params.get("region") or "UNKNOWN").strip() or "UNKNOWN",
             "--source", (params.get("source") or "YouTube_CC").strip() or "YouTube_CC",
@@ -159,6 +160,8 @@ class JobExecutor:
         ]
         if params.get("no_cc_check"):
             cmd.append("--no-cc-check")
+        if params.get("pre_downloaded"):
+            cmd.append("--pre-downloaded")
         if (params.get("cookies") or "").strip():
             cmd += ["--cookies", params["cookies"].strip()]
         if (params.get("cookies_from_browser") or "").strip():

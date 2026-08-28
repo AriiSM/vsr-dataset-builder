@@ -1,4 +1,0 @@
-# DEPRECATED — dependența Flask-ului vechi (frontend/app.py, păstrat doar ca
-# fallback până la paritatea confirmată la pilot). UI-ul de producție e servit
-# de FastAPI (backend/api) / nginx (Docker) — nu instala acest fișier.
-flask>=3.0

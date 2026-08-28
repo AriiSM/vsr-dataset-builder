@@ -128,7 +128,7 @@ After each clip is processed, the result is written to `data/clips/{video_id}/.c
 
 ### Catalog (storage v2)
 
-ALL metadata lives in `data/catalog/dataset.db` (SQLite, WAL) — written automatically by `CatalogWriter` through `vsr_shared/catalog_db.py` (the only file that knows SQL), one transaction per clip. `videos_master.csv` / `segments_index.csv` in `data/catalog/` are best-effort mirrors kept for the Flask frontend until the FastAPI step; regenerate them any time with `python backend/tools/export_catalog.py`. Other tools: `import_videos.py` (curator CSV → DB), `verify_dataset.py` (disk↔DB consistency report). The old Windows pending-updates queue is gone — SQLite doesn't lock the way Excel does. Automatic `dataset.db` backups (last 5) land in `data/catalog/backups/` after each video.
+ALL metadata lives in `data/catalog/dataset.db` (SQLite; WAL, with automatic fallback to the classic rollback journal on Windows bind mounts) — written automatically by `CatalogWriter` through `vsr_shared/catalog_db.py` (the only file that knows SQL), one transaction per clip. CSVs are **exports only** — nothing in the pipeline reads or writes them; generate them on demand with `python backend/tools/export_catalog.py`. Batch/resume selection, stats, bulk import and the API all read the `videos`/`segments` tables directly. Other tools: `import_videos.py` (curator CSV → DB), `verify_dataset.py` (disk↔DB consistency report). The old Windows pending-updates queue is gone — SQLite doesn't lock the way Excel does. Automatic `dataset.db` backups (last 5) land in `data/catalog/backups/` after each video.
 
 ### External model dependencies
 
@@ -170,10 +170,9 @@ python backend/run_worker.py
 # Then open http://localhost:8000
 ```
 
-`/api/start`, `/api/status`, `/api/stop`, `/api/bulk_import` keep the exact
-legacy Flask contract (compat layer over the queue), so the React build needs
-no changes. `frontend/app.py` (Flask) is DEPRECATED — kept only as a fallback
-until UI parity is confirmed on the processing machine.
+`/api/start`, `/api/status`, `/api/stop`, `/api/bulk_import` keep the shapes
+the React build already calls (compat layer over the queue). The old Flask app
+was DELETED after UI parity was confirmed on the processing machine.
 
 Four tabs:
 - **Process** — select run mode (Batch Pending / Batch Failed / Resume / Single), fill in parameters, press START. Live log streams every 1.2 s.

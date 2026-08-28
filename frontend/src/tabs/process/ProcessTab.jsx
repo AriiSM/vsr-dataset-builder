@@ -22,6 +22,9 @@ const INITIAL_FORM = {
   bulkSource: 'YouTube_CC',
   bulkUrls: '',
   bulkNoCcCheck: false,
+  // pre-downloaded corpus: lines are "md_001 <url>"; raw files already in
+  // data/raw — the backend maps them (metadata fetch only, no download).
+  bulkPreDownloaded: false,
   // cookies (shared)
   cookies: '',
   cookiesBrowser: '',
@@ -41,7 +44,20 @@ function buildStartRequest(mode, form, selectedIds) {
       .split(/[\r\n]+/)
       .map((s) => s.trim())
       .filter((s) => s && !s.startsWith('#'));
-    if (!urls.length) return { error: 'Paste at least one YouTube URL.' };
+    if (!urls.length) {
+      return {
+        error: form.bulkPreDownloaded
+          ? 'Paste at least one line: md_001 https://...'
+          : 'Paste at least one YouTube URL.',
+      };
+    }
+    if (form.bulkPreDownloaded) {
+      // Client-side strict check so a bad line is caught before the job.
+      const bad = urls.find(
+        (u) => !(u.split(/\s+/).length === 2 && u.split(/\s+/)[1].includes('://')),
+      );
+      if (bad) return { error: `Expected "md_001 https://..." — got: ${bad}` };
+    }
     return {
       isBulk: true,
       body: {
@@ -50,6 +66,7 @@ function buildStartRequest(mode, form, selectedIds) {
         region: form.bulkRegion,
         source: form.bulkSource,
         no_cc_check: form.bulkNoCcCheck,
+        pre_downloaded: form.bulkPreDownloaded,
         cookies: cookies || undefined,
         cookies_from_browser: browser || undefined,
       },

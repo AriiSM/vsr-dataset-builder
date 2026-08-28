@@ -1,17 +1,14 @@
 """
 CSV schemas — column documentation + the storage-v1 export shapes.
 
-Storage v2 made dataset.db the source of truth; this module keeps three
+Storage v2 made dataset.db the source of truth; this module keeps two
 jobs: (1) ProcessingStatus — the video state machine used across the
 pipeline; (2) the three *_SCHEMA dicts — self-documenting column
 definitions that export_catalog.py uses to emit CSVs in the stable v1
-shapes; (3) empty-CSV seeds for the curator-edited input master
-(cli init). Each schema value documents type / required / description /
+shapes; Each schema value documents type / required / description /
 example for humans reading the exports.
 """
 
-import pandas as pd
-from pathlib import Path
 from enum import Enum
 
 
@@ -489,43 +486,4 @@ SPEAKERS_REGISTRY_SCHEMA = {
 }
 
 
-def create_empty_videos_master(output_path: Path) -> pd.DataFrame:
-    """Create an empty videos master CSV file with proper schema."""
 
-    columns = list(VIDEOS_MASTER_SCHEMA.keys())
-    df = pd.DataFrame(columns=columns)
-
-    # Add example row
-    example_row = {
-        col: schema.get("example", "")
-        for col, schema in VIDEOS_MASTER_SCHEMA.items()
-    }
-    df = pd.concat([df, pd.DataFrame([example_row])], ignore_index=True)
-
-    df.to_csv(output_path, index=False)
-
-    print(f"Created empty videos master at: {output_path}")
-    return df
-
-
-def create_empty_segments_index(output_path: Path) -> pd.DataFrame:
-    """Create an empty segments index CSV file."""
-
-    columns = list(SEGMENTS_INDEX_SCHEMA.keys())
-    df = pd.DataFrame(columns=columns)
-
-    df.to_csv(output_path, index=False)
-    print(f"Created empty segments index at: {output_path}")
-    return df
-
-
-if __name__ == "__main__":
-    output_dir = Path("./data/metadata")  # relative to project root
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    create_empty_videos_master(output_dir / "videos_master.csv")
-    create_empty_segments_index(output_dir / "segments_index.csv")
-
-    print("\nSchema created successfully!")
-    print(f"Videos master columns: {len(VIDEOS_MASTER_SCHEMA)}")
-    print(f"Segments index columns: {len(SEGMENTS_INDEX_SCHEMA)}")

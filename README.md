@@ -32,6 +32,11 @@ Nu există separare dev/producție: aceeași configurare, aceleași comenzi, pes
 | **GPU NVIDIA** (≥4 GB VRAM) + driver la zi | doar pentru worker (procesare); `nvidia-smi` trebuie să meargă pe gazdă |
 | cont Hugging Face + token | diarizare (pyannote) — vezi pasul 3 |
 
+> **Windows/cmd — două reguli care scutesc erori ciudate:** rulează comenzile
+> **una pe rând** (nu lipi două pe aceeași linie) și exact așa cum sunt scrise
+> — toate sunt deja pe o singură linie, compatibile cmd/PowerShell/bash.
+> La comenzi Windows native (`del`, `copy`) folosește backslash: `data\catalog\...`.
+
 **Windows**: plafonează RAM-ul mașinii WSL2 (altfel își rezervă jumătate din
 RAM) — creează `%UserProfile%\.wslconfig` cu:
 
@@ -141,9 +146,17 @@ docker compose -f docker/compose.yaml --profile ui --profile worker up -d
 
 Deschide **http://localhost:8080** (portul din `VSR_UI_PORT`):
 
-- **Process** — adaugi video-uri (*Bulk import*: lipești URL-uri de YouTube,
-  primesc id-uri `md_001`, …) și pornești joburi: batch / single / resume;
-  log live; *Stop* = anulare curată, reluabilă;
+- **Process** — adaugi video-uri prin *Bulk import*:
+  - normal: lipești URL-uri (unul pe linie), primesc id-uri `md_001`, … și
+    se descarcă;
+  - **cu bifa „Videos already downloaded"**: lipești perechi
+    `md_001 https://...` — pentru corpusuri PRE-descărcate în `data/raw/`:
+    nu se descarcă nimic, se iau doar metadatele de la link (titlu, canal,
+    durată, licență), iar fișierul raw e verificat cu ffprobe (durata față
+    de metadate) înainte de înregistrarea în catalog (dataset.db);
+
+  și pornești joburi: batch / single / resume; log live; *Stop* = anulare
+  curată, reluabilă;
 - **Review** — aprobi / respingi / editezi segmente (taste: A/R/S/E + săgeți);
 - **Explorer** — cauți prin segmente; **Stats** — statisticile corpusului.
 
@@ -158,7 +171,10 @@ docker compose -f docker/compose.yaml --profile refiner up refiner
 ```
 
 Catalogul se deschide cu [DB Browser for SQLite](https://sqlitebrowser.org):
-`data/catalog/dataset.db` (read-only cât rulează pipeline-ul).
+`data/catalog/dataset.db` — **OBLIGATORIU cu „Open Database Read Only" cât
+timp aplicația rulează**: deschis normal, DB Browser ține un lock de scriere
+care, peste puntea Windows→WSL2, blochează complet workerul
+(`unable to open database file`, crash-loop). Verificat pe viu la pilot.
 
 ---
 
@@ -168,9 +184,11 @@ Catalogul se deschide cu [DB Browser for SQLite](https://sqlitebrowser.org):
 docker compose -f docker/compose.yaml ps                  # ce rulează
 docker compose -f docker/compose.yaml logs -f worker      # logul workerului
 docker compose -f docker/compose.yaml down                # oprire (datele rămân)
-# update după schimbări de cod (build + repornire):
+# update după schimbări de cod — TOATE cele 3 verigi, în ordine:
+git pull
 docker compose -f docker/compose.yaml build
 docker compose -f docker/compose.yaml --profile ui --profile worker up -d
+# (codul e COPIAT în imagini: fără `build`, containerele rulează senin codul vechi)
 
 # sănătatea datelor + exporturi CSV la cerere:
 docker compose -f docker/compose.yaml run --rm worker python backend/tools/verify_dataset.py
@@ -217,6 +235,12 @@ python backend/run_worker.py             # alt terminal (doar cu stack-ul comple
 | `doctor` roșu la modele | rulează fetch_models (pasul 5); talknet/syncnet se copiază manual |
 | WSL2 mănâncă RAM | `.wslconfig` cu `memory=8GB` (pasul 1) + restart Docker Desktop |
 | `zsh: command not found: python` (nativ, macOS) | folosește `python3` sau activează venv-ul |
+| worker crash-loop: `unable to open database file` | închide DB Browser (redeschide-l DOAR „Read Only"); dacă persistă: `docker compose ... down`, șterge `data\catalog\dataset.db-wal` și `.db-shm` dacă există, pornește workerul primul |
+| `attempt to write a readonly database` | imagine veche (api rula ne-root) — `git pull` + `build` |
+| aceeași eroare și după „fix" | ai sărit o verigă: `git pull` → verifică fix-ul în fișier (`findstr`) → `build` → `up` |
+| jurnalul DB e `delete`, nu `wal` (doctor) | normal pe bind-mount Windows — fallback automat, zero impact |
+| venv stricat după redenumirea/mutarea folderului (nativ) | venv-urile țin calea absolută: șterge `.venv` și recreează-l |
+| `address already in use` la pornirea API (nativ) | API-ul rulează deja; sau pornește cu `--port 9000` |
 
 Documentație internă: `plan.html` (arhitectura completă + roadmap),
 `PIPELINE_NOTES.md` (jurnalul deciziilor), `CLAUDE.md` (ghid pentru lucrul

@@ -173,7 +173,18 @@ def compat_bulk_import(body: dict, db: CatalogDatabase = Depends(get_db)):
             if u and u.strip() and not u.strip().startswith("#")]
     if not urls:
         raise HTTPException(400, "No URLs provided")
+    pre_downloaded = bool(body.get("pre_downloaded", False))
+    if pre_downloaded:
+        # Strict: every line must be "video_id URL" — fail fast with the
+        # offending line so the curator fixes it BEFORE the job runs.
+        bad = [u for u in urls
+               if not (len(u.split()) == 2 and "://" in u.split()[1])]
+        if bad:
+            raise HTTPException(
+                400, f"pre_downloaded: fiecare linie trebuie să fie "
+                     f"'md_001 https://...' — prima nepotrivită: {bad[0]!r}")
     params = {
+        "pre_downloaded": pre_downloaded,
         "urls": urls,
         "prefix": body.get("prefix") or "vid",
         "region": body.get("region") or "UNKNOWN",

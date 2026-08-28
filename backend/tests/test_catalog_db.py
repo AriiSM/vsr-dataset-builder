@@ -180,6 +180,21 @@ class CatalogDatabaseTests(unittest.TestCase):
         listed = self.db.jobs.all()
         self.assertEqual([j["id"] for j in listed], [second, first])
 
+    def test_select_for_batch(self):
+        self.db.videos.set_status("md_001", "completed")   # cel din setUp
+        for vid, status in [("md_010", "pending"), ("md_011", "failed"),
+                            ("md_012", "pending"), ("md_013", "completed")]:
+            self.db.videos.set_status(vid, status)
+        pending = self.db.videos.select_for_batch(status_filter=["pending"])
+        self.assertEqual({r["video_id"] for r in pending}, {"md_010", "md_012"})
+        # video_ids ocolește filtrul de status (semantica din era CSV)
+        picked = self.db.videos.select_for_batch(
+            status_filter=["pending"], video_ids=["md_013"])
+        self.assertEqual([r["video_id"] for r in picked], ["md_013"])
+        limited = self.db.videos.select_for_batch(
+            status_filter=["pending", "failed"], limit=2)
+        self.assertEqual(len(limited), 2)
+
     def test_dataset_overview_view(self):
         self.db.segments.upsert(_segment_row(quality_tier="A"))
         self.db.segments.upsert(_segment_row(

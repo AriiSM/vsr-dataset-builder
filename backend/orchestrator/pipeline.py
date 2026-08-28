@@ -18,7 +18,6 @@ import traceback
 from pathlib import Path
 from typing import List, Optional
 
-import pandas as pd
 from loguru import logger
 
 from orchestrator.catalog_writer import CatalogWriter
@@ -297,7 +296,7 @@ class VSRPipeline:
             # exported segments so a recurring speaker gets ONE id, then write
             # per-cluster demographics (gender + numeric age) to the registry.
             # MUST run before _update_excel — that's what rewrites
-            # segments_index.csv with the final speaker_id values.
+            # the segments table with the final speaker_id values.
             if self.config.speaker_identity_enabled:
                 try:
                     self._assign_speaker_identities(
@@ -438,19 +437,12 @@ class VSRPipeline:
             )
 
     def _video_region(self, video_id: str) -> str:
-        """The video's region from videos_master.csv (accent default)."""
-        master_csv = self.config.metadata_dir / "videos_master.csv"
-        if not master_csv.exists():
-            return ""
+        """The video's region from the videos table (accent default)."""
         try:
-            master = pd.read_csv(master_csv)
-            row = master[master["video_id"].astype(str) == video_id]
-            if not row.empty:
-                raw = row.iloc[0].get("region", "")
-                return "" if pd.isna(raw) else str(raw).strip()
+            return self.catalog.db.videos.region(video_id)
         except Exception as e:
             logger.debug(f"Could not read region for {video_id}: {e}")
-        return ""
+            return ""
 
     def _segment_video_into_sentences(
         self, video_path: Path, video_id: str
@@ -561,16 +553,15 @@ class VSRPipeline:
 
         If video_ids is given, only those rows are considered (status filter
         is bypassed) — the on-disk clip/partial check still applies.
-        """
-        df = self.catalog.read_master_for_edit(excel_path)
 
-        if video_ids:
-            eligible = df[df["video_id"].astype(str).isin(video_ids)]
-        else:
-            eligible = df[df["status"].isin(["processing", "failed"])]
+        `excel_path` is accepted for call-site compatibility and IGNORED —
+        selection reads the videos table of dataset.db (storage v2).
+        """
+        eligible = self.catalog.db.videos.select_for_batch(
+            status_filter=["processing", "failed"], video_ids=video_ids)
 
         resumable_rows = []
-        for _, row in eligible.iterrows():
+        for row in eligible:
             vid = str(row["video_id"])
             has_clips = (self.config.clips_dir / vid).exists() and any(
                 (self.config.clips_dir / vid).glob("*.mp4")
@@ -588,7 +579,7 @@ class VSRPipeline:
         results = []
         for i, row in enumerate(resumable_rows, 1):
             vid = str(row["video_id"])
-            url = str(row.get("youtube_url", ""))
+            url = str(row.get("youtube_url") or "")
             logger.info(f"Resuming {i}/{len(resumable_rows)}: {vid}")
             results.append(self.resume_video(vid, url))
 
@@ -602,29 +593,24 @@ class VSRPipeline:
         limit: Optional[int] = None,
         video_ids: Optional[List[str]] = None,
     ) -> List[ProcessingResult]:
-        """Process videos from the Excel master.
+        """Process a selection of videos from the catalog (videos table).
 
-        If video_ids is given, only those rows are processed (status_filter is ignored).
+        If video_ids is given, only those rows are processed (status_filter
+        is ignored). `excel_path` is accepted for call-site compatibility
+        and IGNORED — the DB is the source of truth (storage v2).
         """
-        df = self.catalog.read_master_for_edit(excel_path)
-
-        if video_ids:
-            df = df[df["video_id"].astype(str).isin(video_ids)]
-        elif status_filter:
-            df = df[df["status"].isin(status_filter)]
-
-        if limit:
-            df = df.head(limit)
+        rows = self.catalog.db.videos.select_for_batch(
+            status_filter=status_filter, video_ids=video_ids, limit=limit)
 
         results: List[ProcessingResult] = []
-        total = len(df)
+        total = len(rows)
 
-        for i, (_, row) in enumerate(df.iterrows(), start=1):
+        for i, row in enumerate(rows, start=1):
             video_id = str(row["video_id"])
-            url = str(row.get("youtube_url", ""))
+            url = str(row.get("youtube_url") or "")
 
-            license_val = str(row.get("license", "unverified")).strip()
-            verify_cc = license_val == "unverified"
+            license_val = str(row.get("license") or "unverified").strip()
+            verify_cc = license_val in ("", "unverified")
 
             logger.info(f"Processing video {i}/{total}: {video_id}")
             self._check_cancel(video_id)

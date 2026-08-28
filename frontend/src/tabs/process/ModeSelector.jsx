@@ -121,17 +121,31 @@ export function ModeSelector({
               <option value="Other">Other</option>
             </select>
           </div>
+          <label className="rv-opt-label" style={{ marginTop: 8 }}>
+            <input
+              type="checkbox"
+              checked={form.bulkPreDownloaded}
+              onChange={set('bulkPreDownloaded')}
+            />
+            Videos already downloaded (in data/raw) — map them, fetch metadata only
+          </label>
           <div style={{ marginTop: 8 }}>
             <span
               className="option-label"
               style={{ display: 'block', marginBottom: 4, width: 'auto' }}
             >
-              YouTube URLs (one per line)
+              {form.bulkPreDownloaded
+                ? 'video_id + URL (one pair per line)'
+                : 'YouTube URLs (one per line)'}
             </span>
             <textarea
               className="text-input"
               rows={6}
-              placeholder={'https://youtube.com/watch?v=...\nhttps://youtu.be/...\n# lines starting with # are ignored'}
+              placeholder={
+                form.bulkPreDownloaded
+                  ? 'md_001 https://youtube.com/watch?v=...\nmd_002 https://youtu.be/...\n# id-ul trebuie să corespundă cu data/raw/{id}.mp4'
+                  : 'https://youtube.com/watch?v=...\nhttps://youtu.be/...\n# lines starting with # are ignored'
+              }
               style={{ resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 11, width: '100%' }}
               value={form.bulkUrls}
               onChange={set('bulkUrls')}

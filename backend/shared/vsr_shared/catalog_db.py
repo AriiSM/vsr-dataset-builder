@@ -331,6 +331,24 @@ class VideosRepo(_Repo):
         return [dict(r) for r in self._conn.execute(
             "SELECT * FROM videos ORDER BY video_id")]
 
+    def select_for_batch(self, status_filter=None, video_ids=None,
+                         limit=None) -> List[dict]:
+        """Batch selection — the DB replaces the old videos_master.csv read.
+
+        video_ids (explicit picks) bypass the status filter, same semantics
+        the CSV era had. Row counts are small (hundreds) — python filtering
+        keeps this readable."""
+        rows = self.all()
+        if video_ids:
+            wanted = {str(v) for v in video_ids}
+            rows = [r for r in rows if str(r["video_id"]) in wanted]
+        elif status_filter:
+            allowed = set(status_filter)
+            rows = [r for r in rows if (r.get("status") or "") in allowed]
+        if limit:
+            rows = rows[:int(limit)]
+        return rows
+
     def region(self, video_id: str) -> str:
         row = self._conn.execute(
             "SELECT region FROM videos WHERE video_id = ?", (video_id,)
