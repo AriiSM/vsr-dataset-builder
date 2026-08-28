@@ -241,6 +241,7 @@ python backend/run_worker.py             # alt terminal (doar cu stack-ul comple
 | jurnalul DB e `delete`, nu `wal` (doctor) | normal pe bind-mount Windows — fallback automat, zero impact |
 | venv stricat după redenumirea/mutarea folderului (nativ) | venv-urile țin calea absolută: șterge `.venv` și recreează-l |
 | `address already in use` la pornirea API (nativ) | API-ul rulează deja; sau pornește cu `--port 9000` |
+| toate clipurile pică la export: `module 'mediapipe' has no attribute 'solutions'` | mediapipe prea nou (API-ul clasic `mp.solutions` a fost scos) — `git pull` (pin `mediapipe==0.10.21`) + `build`; apoi șterge `data\clips\{video_id}\.checkpoint.json` și dă *Resume* — altfel clipurile picate rămân marcate „procesate" și sunt sărite |
 
 Documentație internă: `plan.html` (arhitectura completă + roadmap),
 `PIPELINE_NOTES.md` (jurnalul deciziilor), `CLAUDE.md` (ghid pentru lucrul

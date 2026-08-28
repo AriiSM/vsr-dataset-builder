@@ -35,7 +35,9 @@ retinaface-pytorch>=0.0.1
 
 python_speech_features>=0.6  # MFCC features required by TalkNet-ASD
 scipy>=1.11            # wavfile I/O, zoom, linear_sum_assignment
-mediapipe>=0.10        # FaceMesh dense lip landmarks for the 96×96 mouth crop
+mediapipe==0.10.21     # FaceMesh dense lip landmarks for the 96×96 mouth crop
+                       # PINNED: newer releases dropped the legacy mp.solutions
+                       # API -> "module 'mediapipe' has no attribute 'solutions'"
 yt-dlp>=2024.1         # YouTube download with Creative Commons filtering
 loguru>=0.7
 
