@@ -48,6 +48,12 @@ RUN mkdir -p data models
 ARG GIT_SHA=""
 ENV GIT_SHA=${GIT_SHA}
 
+# torch>=2.6 defaults torch.load(weights_only=True); the whisperx VAD
+# checkpoint carries omegaconf objects and gets rejected. Official escape
+# hatch — safe here: every model we load is hash-pinned in config/models.yaml
+# or fetched from the pinned HF/whisperx sources.
+ENV TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+
 # Cache-urile de modele sunt redirecționate sub /app/models de
 # vsr_shared/model_env.py (TORCH_HOME/HF_HOME/INSIGHTFACE_HOME) — worker-ul
 # o face singur la pornire; nimic nu se descarcă în imagine.
