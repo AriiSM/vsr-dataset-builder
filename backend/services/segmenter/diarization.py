@@ -1,5 +1,5 @@
 """
-Speaker Diarization (pyannote via WhisperX)
+Speaker Diarization (pyannote, called directly)
 
 WHO speaks WHEN: anonymous per-video voice labels (SPEAKER_00, SPEAKER_01…)
 stamped onto transcribed words, so the sentence segmenter can cut at speaker
@@ -19,7 +19,7 @@ from loguru import logger
 
 
 class SpeakerDiarizer:
-    """WHO speaks WHEN — pyannote diarization, integrated through WhisperX.
+    """WHO speaks WHEN — pyannote diarization, loaded directly.
 
     Produces anonymous per-video voice labels (SPEAKER_00, SPEAKER_01…) and
     stamps them onto already-transcribed words, so the sentence segmenter can
@@ -55,21 +55,33 @@ class SpeakerDiarizer:
                 "generate an access token and put it in config.yaml."
             )
         try:
-            # whisperx moved DiarizationPipeline between versions
-            try:
-                from whisperx.diarize import DiarizationPipeline
-            except ImportError:
-                from whisperx import DiarizationPipeline
-            self._pipeline = DiarizationPipeline(
-                use_auth_token=self.hf_token, device=self.device,
+            # Direct pyannote — NOT the whisperx DiarizationPipeline wrapper:
+            # that wrapper hardcodes use_auth_token, which newer
+            # huggingface_hub renamed to token, and breaks at load time.
+            import inspect
+
+            from pyannote.audio import Pipeline as PyannotePipeline
+
+            params = inspect.signature(
+                PyannotePipeline.from_pretrained).parameters
+            token_kw = "token" if "token" in params else "use_auth_token"
+            pipeline = PyannotePipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                **{token_kw: self.hf_token},
             )
+            if pipeline is None:
+                raise RuntimeError(
+                    "from_pretrained returned None — usually the HF token "
+                    "has not accepted the model terms"
+                )
+            self._pipeline = pipeline.to(torch.device(self.device))
         except Exception as e:
             raise RuntimeError(
                 f"Could not load the pyannote diarization pipeline: {e}. "
                 "Check that pyannote.audio is installed and the HF token has "
                 "accepted the model terms."
             ) from e
-        logger.info("Diarization pipeline loaded (pyannote via WhisperX)")
+        logger.info("Diarization pipeline loaded (pyannote)")
 
     def assign_speaker_labels(self, words: list, audio_path: Path) -> int:
         """Run diarization and stamp each TimedWord with its voice label.
@@ -83,14 +95,14 @@ class SpeakerDiarizer:
         self._ensure_pipeline_loaded()
 
         logger.info("Diarizing (who speaks when)...")
-        turns_frame = self._pipeline(
+        annotation = self._pipeline(
             str(audio_path),
             min_speakers=self.min_speakers,
             max_speakers=self.max_speakers,
         )
         speaker_turns = [
-            (row["start"], row["end"], row["speaker"])
-            for _, row in turns_frame.iterrows()
+            (turn.start, turn.end, label)
+            for turn, _, label in annotation.itertracks(yield_label=True)
         ]
 
         labeled = self.label_words_by_overlap(words, speaker_turns)
