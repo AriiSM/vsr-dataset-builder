@@ -245,6 +245,7 @@ python backend/run_worker.py             # alt terminal (doar cu stack-ul comple
 | toate clipurile pică la export: `module 'mediapipe' has no attribute 'solutions'` | mediapipe prea nou (API-ul clasic `mp.solutions` a fost scos) — `git pull` (pin `mediapipe==0.10.21`) + `build`; apoi șterge `data\clips\{video_id}\.checkpoint.json` și dă *Resume* — altfel clipurile picate rămân marcate „procesate" și sunt sărite |
 | pipeline pică la segmentare: `module 'torchaudio' has no attribute 'AudioMetaData'` | torchaudio prea nou (>=2.9 a scos API-ul folosit de diarizare) — `git pull` (trio pinuit `torch==2.7.1`/`torchvision==0.22.1`/`torchaudio==2.7.1`) + `build` la worker |
 | la încărcarea Whisper: `Weights only load failed ... omegaconf.listconfig.ListConfig` | NU e o problemă de RAM/disc — torch>=2.6 refuză implicit checkpoint-uri cu obiecte ne-tensor (modelul VAD al whisperx e așa); imaginea setează `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` (supapa oficială; modelele noastre sunt fixate cu hash) — `git pull` + `build` la worker |
+| workerul „renaște" fără traceback la prima transcriere; în log, chiar înainte: `Could not load library libcudnn_ops_infer.so.8` | motorul Whisper (ctranslate2) cere cuDNN 8, imaginea CUDA 12.8 vine cu cuDNN 9 — la lipsa bibliotecii procesul e avortat instant (jobul rămâne `interrupted`); imaginea instalează acum cuDNN 8 lângă 9 (`/opt/cudnn8`) — `git pull` + `build` la worker |
 
 Documentație internă: `plan.html` (arhitectura completă + roadmap),
 `PIPELINE_NOTES.md` (jurnalul deciziilor), `CLAUDE.md` (ghid pentru lucrul

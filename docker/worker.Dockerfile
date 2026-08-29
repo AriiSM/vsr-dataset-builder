@@ -31,6 +31,16 @@ COPY requirements.txt /tmp/requirements.txt
 RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt && \
     python -m pip install --no-cache-dir onnxruntime-gpu
 
+# 2b. cuDNN 8 ALĂTURI de cuDNN 9: baza CUDA 12.8 aduce cuDNN 9, dar motorul
+# Whisper (ctranslate2/faster-whisper) dlopen-ează libcudnn_ops_infer.so.8 —
+# fără ea procesul e ABORTAT instant la prima transcriere, fără traceback
+# Python (workerul doar „renaște"). Instalat cu --target ca să NU suprascrie
+# pachetul nvidia-cudnn-cu12 v9 de care depinde torch; loader-ul alege după
+# soname, deci cele două versiuni coexistă.
+RUN python -m pip install --no-cache-dir --target /opt/cudnn8 \
+        nvidia-cudnn-cu12==8.9.7.29
+ENV LD_LIBRARY_PATH=/opt/cudnn8/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+
 # 3. TalkNet vendorizat (clonat în rădăcina repo-ului înainte de build).
 # Repo-ul oficial NU are setup.py — nu se instalează cu pip; codul îl
 # importă direct (`from talkNet import ...`), deci ajunge pe PYTHONPATH.
