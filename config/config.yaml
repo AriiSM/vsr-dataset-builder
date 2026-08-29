@@ -174,21 +174,35 @@ syncnet:
 
 # ===== Per-Clip Quality Filters =====
 clip_filters:
+  # EXTRACTION PHILOSOPHY (29 aug, user decision): this pipeline extracts
+  # MAXIMALLY — gates kill only unusable-by-construction clips (no face at
+  # all, voice clearly not matching any face, gibberish text). Everything
+  # borderline goes THROUGH, tagged by quality_tier; filtering happens later,
+  # in a separate manual-review project. Better junk in the catalog than
+  # good clips lost.
+
   # Drop clip if face visible in fewer than this fraction of frames
-  face_visibility_threshold: 0.80
+  face_visibility_threshold: 0.70
 
   # ASD gate: when even the WINNING track's mean score (0-20 scale) is below
   # this, no visible face matches the audio — voice-over / B-roll / reaction
   # shot. Such clips are POISON for lip reading (text misaligned with lips),
   # and dropping them early also skips SyncNet + export + embedding.
-  # 2.0 ≈ 10% speaking probability — conservative; calibrate on the pilot.
   # 0.0 disables the gate (everything kept, scored by tier only).
-  min_asd_score: 2.0
+  # PILOT CALIBRATION (29 aug): 2.0 cut plausible borderline speakers
+  # (observed 0.8-1.7 on real clips). Gate now only kills the clear
+  # not-speaking cases; borderline goes through as tier C for review.
+  min_asd_score: 0.5
   # NOTE: SyncNet never gates (unstable on short clips — Milestone 3 finding);
   # its confidence feeds quality_tier only.
 
-  # Minimum Whisper word confidence to keep a clip
-  min_whisper_confidence: 0.5
+  # Minimum word confidence (wav2vec2 ALIGNMENT scores, NOT raw Whisper) to
+  # keep a clip. PILOT CALIBRATION (29 aug): the Romanian alignment model
+  # scores cluster around 0.3-0.55, so the old 0.5 cut through the middle of
+  # the NORMAL distribution and dropped nearly everything. The gate's job is
+  # only to kill disasters (gibberish/hallucinated text, scores near 0);
+  # quality ranking happens in quality_tiers + manual review.
+  min_whisper_confidence: 0.2
 
   # Minimum overlap (seconds) between a face track and speech to consider
   # the track as a candidate, and minimum duration of the trimmed track
@@ -198,6 +212,11 @@ clip_filters:
 
 # ===== Export Settings =====
 export:
+  # GPU→CPU conveyor: the CPU-only export of clip N (MediaPipe mouth crop,
+  # libx264 encode, tier, ArcFace-on-CPU) runs on a separate thread while
+  # the GPU analyzes clip N+1 — the GPU never waits for encoding.
+  # Measured intent: ~25-40% faster per video. false = sequential (debug).
+  gpu_cpu_overlap: true
   include_audio: true
   crop_margin: 0.4   # production uses 0.4 (was 0.2 in yaml but code default 0.4 was actually applied)
   mouth_resolution: [96, 96]

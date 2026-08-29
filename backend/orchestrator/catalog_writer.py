@@ -137,8 +137,14 @@ class CatalogWriter:
         )
 
     def record_dropped_clip(self, video_id: str, clip, reason: str,
-                            face_visibility: Optional[float] = None):
-        """Persist a rejection WITH its reason — survives clips/ cleanup."""
+                            face_visibility: Optional[float] = None,
+                            whisper_conf: Optional[float] = None,
+                            asd_score: Optional[float] = None):
+        """Persist a rejection WITH its reason — survives clips/ cleanup.
+
+        Scores measured before the drop travel along (None = never computed)
+        so gate thresholds can be calibrated from real distributions.
+        """
         try:
             self.db.videos.ensure_exists(video_id)
             self.db.dropped.record(
@@ -146,6 +152,8 @@ class CatalogWriter:
                 start_time=getattr(clip, "start_time", None),
                 end_time=getattr(clip, "end_time", None),
                 face_visibility=face_visibility,
+                whisper_conf=whisper_conf,
+                asd_score=asd_score,
             )
         except Exception as e:
             logger.debug(f"dropped_clips record skipped: {e}")

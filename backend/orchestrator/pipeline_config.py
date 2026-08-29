@@ -213,6 +213,9 @@ class PipelineConfig:
     use_ffmpeg_pipe: bool
     # Storage v2: write audio/{segment_id}.wav next to the crops
     save_segment_audio: bool
+    # GPU→CPU conveyor: export clip N on a CPU thread while the GPU
+    # analyzes N+1 (see pipeline.process_video). False = sequential.
+    gpu_cpu_overlap: bool
     gaussian_smoothing_sigma: float
     mouth_gaussian_smoothing_sigma: float
     minimum_crop_size_pixels: int
@@ -375,6 +378,7 @@ class PipelineConfig:
             video_preset=str(export.get("video_preset", "veryfast")),
             use_ffmpeg_pipe=bool(export.get("use_ffmpeg_pipe", True)),
             save_segment_audio=bool(export.get("save_segment_audio", True)),
+            gpu_cpu_overlap=bool(export.get("gpu_cpu_overlap", True)),
             gaussian_smoothing_sigma=float(export["gaussian_smoothing_sigma"]),
             mouth_gaussian_smoothing_sigma=float(export["mouth_gaussian_smoothing_sigma"]),
             minimum_crop_size_pixels=int(export["minimum_crop_size_pixels"]),

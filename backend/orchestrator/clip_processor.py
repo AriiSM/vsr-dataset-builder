@@ -20,7 +20,7 @@ from loguru import logger
 
 from orchestrator.checkpoint_store import CheckpointStore
 from orchestrator.pipeline_config import PipelineConfig
-from orchestrator.processing_results import ClipResult
+from orchestrator.processing_results import AnalyzedClip, ClipResult
 from orchestrator.service_container import ServiceContainer
 from services.face_tracker.video_processor import FaceTrack
 from services.quality_indexer.quality_tiers import compute_quality_tier
@@ -48,8 +48,19 @@ class ClipProcessor:
         video_id: str,
         segment_index: int,
     ) -> ClipResult:
+        """Sequential path: full GPU analysis + CPU export in one call.
+
+        The GPU↔CPU conveyor (export.gpu_cpu_overlap) calls analyze() and
+        export_analyzed() separately instead — same steps, two threads.
         """
-        Process a single VAD clip through the quality pipeline.
+        outcome = self.analyze(clip, video_id)
+        if isinstance(outcome, ClipResult):
+            return outcome
+        return self.export_analyzed(outcome, video_id, segment_index)
+
+    def analyze(self, clip: VideoClip, video_id: str):
+        """
+        GPU phase of the quality pipeline for a single clip.
 
         Steps (ordered cheapest-first to exit early):
           a. Face detection + tracking on clip video
@@ -59,7 +70,9 @@ class ClipProcessor:
           e. ASD on candidate tracks only                       (expensive)
           f. Pick best track
           g. SyncNet verification
-          h. LRS2 export
+
+        Returns a ClipResult when the clip drops at a gate (terminal), or an
+        AnalyzedClip payload for the CPU-only export phase (h).
         """
 
         # a. Face detection + tracking
@@ -145,6 +158,7 @@ class ClipProcessor:
                 dropped=True,
                 drop_reason=f"low_confidence={merged.confidence:.2f}",
                 face_visibility_ratio=visibility,
+                whisper_conf=float(merged.confidence),
             )
 
         # d–f. Pick the best ASD speaker track overlapping the transcription.
@@ -161,6 +175,7 @@ class ClipProcessor:
                 clip, dropped=True,
                 drop_reason="no_track_overlaps_speech",
                 face_visibility_ratio=visibility,
+                whisper_conf=float(merged.confidence),
             )
         best_track, best_asd = selection.track, selection.asd_result
 
@@ -174,6 +189,8 @@ class ClipProcessor:
                 clip, dropped=True,
                 drop_reason=f"low_asd_score={best_asd.mean_score:.1f}",
                 face_visibility_ratio=visibility,
+                whisper_conf=float(merged.confidence),
+                asd_score=float(best_asd.mean_score),
             )
 
         # Trim transcription to match the track's actual frame range so the
@@ -224,28 +241,7 @@ class ClipProcessor:
             confidence=trimmed_conf,
         )
 
-        # g–h. SyncNet verification (optional) + LRS2 export.
-        return self._export(
-            clip=clip,
-            video_id=video_id,
-            segment_index=segment_index,
-            best_track=best_track,
-            best_asd=best_asd,
-            merged=merged,
-            fps=fps,
-            visibility=visibility,
-        )
-
-    def _export(
-        self, clip, video_id, segment_index, best_track, best_asd, merged, fps, visibility,
-    ) -> ClipResult:
-        """SyncNet-verify (if enabled) and export one clip to LRS2 format.
-
-        If both output files already exist on disk (interrupted run with no
-        checkpoint) the segment is loaded instead of re-exported. Returns a
-        ClipResult (dropped only when the export itself fails).
-        """
-        # g. SyncNet (optional — very slow, ~100s per clip)
+        # g. SyncNet (optional) — stays on the GPU thread with the other models.
         if self.config.syncnet_enabled:
             logger.info(f"    [{clip.clip_id}] SyncNet verification...")
             try:
@@ -271,6 +267,39 @@ class ClipProcessor:
         else:
             sync_conf = 0.0
             sync_method = "disabled"
+
+        return AnalyzedClip(
+            clip=clip,
+            best_track=best_track,
+            best_asd=best_asd,
+            merged=merged,
+            fps=fps,
+            visibility=visibility,
+            syncnet_confidence=sync_conf,
+            syncnet_method=sync_method,
+        )
+
+    def export_analyzed(
+        self, analyzed: "AnalyzedClip", video_id: str, segment_index: int,
+    ) -> ClipResult:
+        """CPU phase (h): mouth crop + encode + tier + ArcFace identity.
+
+        Contains NO GPU work (MediaPipe/ffmpeg/libx264 are CPU; ArcFace runs
+        with CPUExecutionProvider) — safe to run on the export lane thread
+        while the GPU thread analyzes the next clip.
+
+        If both output files already exist on disk (interrupted run with no
+        checkpoint) the segment is loaded instead of re-exported. Returns a
+        ClipResult (dropped only when the export itself fails).
+        """
+        clip = analyzed.clip
+        best_track = analyzed.best_track
+        best_asd = analyzed.best_asd
+        merged = analyzed.merged
+        fps = analyzed.fps
+        visibility = analyzed.visibility
+        sync_conf = analyzed.syncnet_confidence
+        sync_method = analyzed.syncnet_method
 
         # h. LRS2 export
         logger.info(f"    [{clip.clip_id}] exporting LRS2 format...")

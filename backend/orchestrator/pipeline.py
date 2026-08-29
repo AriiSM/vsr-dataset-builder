@@ -15,6 +15,8 @@ Collaborators (one file each, one responsibility each):
 
 import time
 import traceback
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional
 
@@ -75,6 +77,84 @@ class VSRPipeline:
     @classmethod
     def from_config(cls, config_path) -> "VSRPipeline":
         return cls(PipelineConfig.from_yaml(Path(config_path)))
+
+    def _record_clip_outcome(
+        self,
+        video_id: str,
+        clip: VideoClip,
+        clip_result: ClipResult,
+        checkpoint: dict,
+        total_clips: int,
+        exported_segments: List[ExportedSegment],
+    ) -> None:
+        """Main-thread bookkeeping for ONE finished clip: checkpoint row,
+        progress heartbeat, dropped/exported catalog writes.
+
+        The checkpoint file and SQLite are touched only here — never from
+        the export lane thread (the DB connection is main-thread-bound)."""
+        seg = clip_result.exported_segment
+        checkpoint.setdefault("processed_clips", {})[clip.clip_id] = {
+            "result": "dropped" if clip_result.dropped else "exported",
+            "reason": clip_result.drop_reason,
+            "segment_id": seg.segment_id if seg else None,
+            "start_time": seg.start_time if seg else None,
+            "end_time": seg.end_time if seg else None,
+            "duration": seg.duration if seg else None,
+            "asd_score": seg.asd_score if seg else None,
+            "syncnet_confidence": seg.syncnet_confidence if seg else None,
+            "whisper_confidence": seg.whisper_confidence if seg else None,
+            # Quality metadata (Phase 0) — read back with .get() so
+            # checkpoints written before this change still resume fine.
+            "face_visibility_ratio": seg.face_visibility_ratio if seg else None,
+            "whisper_conf_min": seg.whisper_conf_min if seg else None,
+            "whisper_conf_p25": seg.whisper_conf_p25 if seg else None,
+            "asd_method": seg.asd_method if seg else None,
+            "syncnet_method": seg.syncnet_method if seg else None,
+            "face_bbox": seg.face_bbox if seg else None,
+            "mouth_landmark_fail_rate": seg.mouth_landmark_fail_rate if seg else None,
+            "mouth_roi_method": seg.mouth_roi_method if seg else None,
+            "head_pose_avg": seg.head_pose_avg if seg else None,
+            "quality_tier": seg.quality_tier if seg else None,
+            "audio_speaker_label": seg.audio_speaker_label if seg else None,
+            "identity": clip_result.identity,
+        }
+        checkpoint["segment_count"] = len(exported_segments) + (1 if seg else 0)
+        checkpoint["video_id"] = video_id
+        self.checkpoints.write(video_id, checkpoint)
+
+        clip_num = len(checkpoint.get("processed_clips", {}))
+        self._report_progress(
+            video_id=video_id, stage="clips",
+            clip_num=clip_num, total_clips=total_clips,
+            segments_exported=len(exported_segments),
+        )
+
+        if clip_result.dropped:
+            logger.info(
+                f"  CLIP {clip_num}/{total_clips} dropped"
+                f" ({clip_result.drop_reason}): {clip.clip_id}"
+            )
+            # Persist the rejection WITH its reason — survives cleanup
+            self.catalog.record_dropped_clip(
+                video_id, clip, clip_result.drop_reason or "",
+                face_visibility=clip_result.face_visibility_ratio,
+                whisper_conf=clip_result.whisper_conf,
+                asd_score=clip_result.asd_score,
+            )
+            return
+
+        if seg:
+            exported_segments.append(seg)
+            logger.info(
+                f"  CLIP {clip_num}/{total_clips} exported: {seg.segment_id}"
+            )
+            # Transaction per clip into dataset.db so the Review tab sees
+            # the segment immediately
+            self.catalog.append_segment(seg)
+            if clip_result.identity and clip_result.identity.get("embedding"):
+                self.catalog.store_segment_embedding(
+                    seg.segment_id, clip_result.identity["embedding"],
+                )
 
     def _report_progress(self, **payload) -> None:
         if self.on_progress is not None:
@@ -184,95 +264,107 @@ class VSRPipeline:
             else:
                 logger.info(f"  Starting fresh ({len(clips)} clips)")
 
-            for clip in clips:
-                # Skip clips already processed in a previous (interrupted) run
-                if clip.clip_id in processed_clip_ids:
-                    logger.debug(f"  Skipping already-processed clip: {clip.clip_id}")
-                    continue
+            # GPU→CPU conveyor (export.gpu_cpu_overlap): this thread owns all
+            # GPU models AND all bookkeeping (checkpoint/DB/progress — SQLite
+            # stays single-threaded); one export-lane thread runs the
+            # CPU-only phase (mouth crop, encode, tier, ArcFace-on-CPU) of
+            # clip N while the GPU analyzes N+1. max_workers=1 keeps segment
+            # indices ordered; the 2-in-flight cap bounds RAM.
+            total_clips = len(clips)
+            use_overlap = self.config.gpu_cpu_overlap
+            next_index = segment_index
+            export_pool = (
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="export-lane")
+                if use_overlap else None
+            )
+            pending: deque = deque()  # (clip, Future) in submission order
 
-                self._check_cancel(video_id)
+            def drain_one(block: bool) -> bool:
+                """Record the oldest in-flight export; False if still running."""
+                pending_clip, future = pending[0]
+                if not block and not future.done():
+                    return False
+                pending.popleft()
                 try:
-                    clip_result = self.clip_processor.process(clip, video_id, segment_index)
+                    result = future.result()
                 except RuntimeError:
-                    # Environment/config problems (missing models, tokens) —
-                    # every clip would fail identically; abort loudly instead.
                     raise
                 except Exception as e:
-                    logger.error(f"Clip {clip.clip_id} failed: {e}")
-                    clip_result = ClipResult(
-                        clip, dropped=True,
+                    logger.error(f"Clip {pending_clip.clip_id} failed: {e}")
+                    result = ClipResult(
+                        pending_clip, dropped=True,
                         drop_reason=f"processing_error: {type(e).__name__}: {str(e)[:150]}",
                     )
-
-                # Record outcome in checkpoint immediately
-                seg = clip_result.exported_segment
-                checkpoint.setdefault("processed_clips", {})[clip.clip_id] = {
-                    "result": "dropped" if clip_result.dropped else "exported",
-                    "reason": clip_result.drop_reason,
-                    "segment_id": seg.segment_id if seg else None,
-                    "start_time": seg.start_time if seg else None,
-                    "end_time": seg.end_time if seg else None,
-                    "duration": seg.duration if seg else None,
-                    "asd_score": seg.asd_score if seg else None,
-                    "syncnet_confidence": seg.syncnet_confidence if seg else None,
-                    "whisper_confidence": seg.whisper_confidence if seg else None,
-                    # Quality metadata (Phase 0) — read back with .get() so
-                    # checkpoints written before this change still resume fine.
-                    "face_visibility_ratio": seg.face_visibility_ratio if seg else None,
-                    "whisper_conf_min": seg.whisper_conf_min if seg else None,
-                    "whisper_conf_p25": seg.whisper_conf_p25 if seg else None,
-                    "asd_method": seg.asd_method if seg else None,
-                    "syncnet_method": seg.syncnet_method if seg else None,
-                    "face_bbox": seg.face_bbox if seg else None,
-                    "mouth_landmark_fail_rate": seg.mouth_landmark_fail_rate if seg else None,
-                    "mouth_roi_method": seg.mouth_roi_method if seg else None,
-                    "head_pose_avg": seg.head_pose_avg if seg else None,
-                    "quality_tier": seg.quality_tier if seg else None,
-                    "audio_speaker_label": seg.audio_speaker_label if seg else None,
-                    "identity": clip_result.identity,
-                }
-                checkpoint["segment_count"] = segment_index + (
-                    1 if clip_result.exported_segment else 0
+                self._record_clip_outcome(
+                    video_id, pending_clip, result, checkpoint,
+                    total_clips, exported_segments,
                 )
-                checkpoint["video_id"] = video_id
-                self.checkpoints.write(video_id, checkpoint)
+                return True
 
-                clip_num = len(checkpoint.get("processed_clips", {}))
-                total_clips = len(clips)
-                self._report_progress(
-                    video_id=video_id, stage="clips",
-                    clip_num=clip_num, total_clips=total_clips,
-                    segments_exported=segment_index,
-                )
+            try:
+                for clip in clips:
+                    # Skip clips already processed in a previous (interrupted) run
+                    if clip.clip_id in processed_clip_ids:
+                        logger.debug(f"  Skipping already-processed clip: {clip.clip_id}")
+                        continue
 
-                if clip_result.dropped:
-                    logger.info(
-                        f"  CLIP {clip_num}/{total_clips} dropped"
-                        f" ({clip_result.drop_reason}): {clip.clip_id}"
-                    )
-                    # Persist the rejection WITH its reason — survives cleanup
-                    self.catalog.record_dropped_clip(
-                        video_id, clip, clip_result.drop_reason or "",
-                        face_visibility=clip_result.face_visibility_ratio,
-                    )
-                    continue
+                    self._check_cancel(video_id)
+                    # Record any export that finished while the GPU worked.
+                    while pending and drain_one(block=False):
+                        pass
+                    # Backpressure: at most 2 exports in flight.
+                    while len(pending) >= 2:
+                        drain_one(block=True)
 
-                if clip_result.exported_segment:
-                    exported_segments.append(clip_result.exported_segment)
-                    segment_index += 1
-                    logger.info(
-                        f"  CLIP {clip_num}/{total_clips} exported:"
-                        f" {clip_result.exported_segment.segment_id}"
-                    )
-                    # Transaction per clip into dataset.db (+ CSV mirror) so
-                    # the Review tab sees the segment immediately
-                    self.catalog.append_segment(clip_result.exported_segment)
-                    if clip_result.identity and clip_result.identity.get("embedding"):
-                        self.catalog.store_segment_embedding(
-                            clip_result.exported_segment.segment_id,
-                            clip_result.identity["embedding"],
+                    try:
+                        if use_overlap:
+                            outcome = self.clip_processor.analyze(clip, video_id)
+                        else:
+                            outcome = self.clip_processor.process(
+                                clip, video_id, len(exported_segments))
+                    except RuntimeError:
+                        # Environment/config problems (missing models, tokens) —
+                        # every clip would fail identically; abort loudly instead.
+                        raise
+                    except Exception as e:
+                        logger.error(f"Clip {clip.clip_id} failed: {e}")
+                        outcome = ClipResult(
+                            clip, dropped=True,
+                            drop_reason=f"processing_error: {type(e).__name__}: {str(e)[:150]}",
                         )
 
+                    if isinstance(outcome, ClipResult):
+                        self._record_clip_outcome(
+                            video_id, clip, outcome, checkpoint,
+                            total_clips, exported_segments,
+                        )
+                        continue
+
+                    # Passed every gate — hand to the export lane. The index
+                    # is assigned at submission; a failed export leaves a gap
+                    # in the numbering, harmless because segment names are
+                    # clip-scoped (clip_id + index).
+                    future = export_pool.submit(
+                        self.clip_processor.export_analyzed,
+                        outcome, video_id, next_index,
+                    )
+                    next_index += 1
+                    pending.append((clip, future))
+
+                while pending:
+                    drain_one(block=True)
+            except PipelineCancelled:
+                # Let in-flight exports finish and checkpoint them (a few
+                # seconds) — nothing is lost, the video resumes exactly here.
+                while pending:
+                    try:
+                        drain_one(block=True)
+                    except Exception:
+                        break
+                raise
+            finally:
+                if export_pool is not None:
+                    export_pool.shutdown(wait=True)
             # 4. Cleanup
             if self.config.cleanup_clips:
                 import shutil

@@ -30,6 +30,28 @@ class ClipResult:
     exported_segment: Optional[ExportedSegment] = None
     # ArcFace identity evidence (JSON-able dict) for speaker clustering
     identity: Optional[dict] = None
+    # Scores measured BEFORE the drop decision (None = never computed).
+    # Recorded on dropped_clips rows so thresholds calibrate on real data.
+    whisper_conf: Optional[float] = None
+    asd_score: Optional[float] = None
+
+
+@dataclass
+class AnalyzedClip:
+    """GPU-phase result for one clip that passed every gate.
+
+    Everything the CPU-only export phase needs (mouth crop + encode + tier +
+    ArcFace identity) — hand-off payload of the GPU→CPU conveyor: while the
+    export lane consumes this, the GPU thread analyzes the next clip.
+    """
+    clip: VideoClip
+    best_track: object          # FaceTrack of the chosen speaker
+    best_asd: object            # ASDResult of the winning track
+    merged: object              # TranscribedSegment, trimmed to track range
+    fps: float
+    visibility: float
+    syncnet_confidence: float   # measured on the GPU thread (or 0.0/disabled)
+    syncnet_method: str
 
 @dataclass
 class ProcessingResult:
