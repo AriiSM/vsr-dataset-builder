@@ -19,8 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.10 /usr/local/bin/python
 
 # 1. torch cu CUDA (layerul cel mai greu — primul, se schimbă cel mai rar)
+# PINNED ca trio (torch/vision/audio merg în perechi fixe): torchaudio>=2.9
+# a scos AudioMetaData (folosit de diarizare), iar un torchvision nepinuit
+# tras de retinaface-pytorch ar suprascrie torch-ul cu ultima versiune.
 RUN python -m pip install --no-cache-dir \
-        torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+        torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
+        --index-url https://download.pytorch.org/whl/cu128
 
 # 2. restul stack-ului ML (torch>= din listă e deja satisfăcut)
 COPY requirements.txt /tmp/requirements.txt

@@ -22,11 +22,14 @@ pyannote.audio>=3.1
 
 # PYTORCH — CUDA build (RTX 3050 Ti, CUDA 12.8)
 # Install with:
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-# CPU fallback (no GPU):
-#   pip install torch torchaudio
-torch>=2.1
-torchaudio>=2.1
+#   pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+# CPU fallback (no GPU): same pins, default index.
+# PINNED as a trio: torchaudio>=2.9 removed AudioMetaData (diarization still
+# calls it), and an unpinned torchvision (pulled in by retinaface-pytorch)
+# would drag torch/torchaudio up to the latest version behind our back.
+torch==2.7.1
+torchvision==0.22.1
+torchaudio==2.7.1
 
 # RetinaFace detector used for face detection in every clip.
 # Two packages exist — use retinaface-pytorch (has pre_trained_models API):
