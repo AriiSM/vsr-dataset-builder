@@ -216,6 +216,14 @@ class PipelineConfig:
     # GPU→CPU conveyor: export clip N on a CPU thread while the GPU
     # analyzes N+1 (see pipeline.process_video). False = sequential.
     gpu_cpu_overlap: bool
+    # -- performance: section (machine-specific resource caps) --
+    # CPU threads for torch CPU ops on the GPU/analysis thread; 0 = all cores
+    # (leaves nothing for the export lane — set below core count on laptops).
+    torch_cpu_threads: int
+    # Threads per ffmpeg/x264 encode in the export lane; 0 = ffmpeg default.
+    encoder_threads: int
+    # Optional thermal breather (ms) after each clip's GPU phase; 0 = off.
+    gpu_pause_ms: int
     gaussian_smoothing_sigma: float
     mouth_gaussian_smoothing_sigma: float
     minimum_crop_size_pixels: int
@@ -290,6 +298,7 @@ class PipelineConfig:
         syncnet = cfg["syncnet"]
         filt = cfg["clip_filters"]
         export = cfg["export"]
+        performance = cfg.get("performance", {}) or {}
         seg = cfg.get("segmentation", {})
         diarization = seg.get("diarization", {})
         mouth_roi = cfg.get("mouth_roi", {})
@@ -379,6 +388,9 @@ class PipelineConfig:
             use_ffmpeg_pipe=bool(export.get("use_ffmpeg_pipe", True)),
             save_segment_audio=bool(export.get("save_segment_audio", True)),
             gpu_cpu_overlap=bool(export.get("gpu_cpu_overlap", True)),
+            torch_cpu_threads=int(performance.get("torch_cpu_threads", 0)),
+            encoder_threads=int(performance.get("encoder_threads", 0)),
+            gpu_pause_ms=int(performance.get("gpu_pause_ms", 0)),
             gaussian_smoothing_sigma=float(export["gaussian_smoothing_sigma"]),
             mouth_gaussian_smoothing_sigma=float(export["mouth_gaussian_smoothing_sigma"]),
             minimum_crop_size_pixels=int(export["minimum_crop_size_pixels"]),

@@ -43,7 +43,11 @@ audio:
     # Word-level timestamps are always produced (WhisperX forced alignment).
     # The transcription confidence gate lives in clip_filters.min_whisper_confidence.
     device: "cuda"        # falls back to cpu automatically if CUDA unavailable
-    compute_type: "float16"
+    # int8_float16 halves Whisper's VRAM (~1.5GB vs ~3GB) with negligible
+    # quality loss on medium — on a 4GB card float16 spilled into shared
+    # memory (PCIe, ~10x slower) during segmentation. Revert to "float16"
+    # only on cards with 8GB+.
+    compute_type: "int8_float16"
     batch_size: 8         # 4GB VRAM — reduce to 4 if you hit OOM errors
     # Free GPU memory once full-video transcription is done (sentence strategy),
     # before RetinaFace / TalkNet are loaded.
@@ -209,6 +213,20 @@ clip_filters:
   # window kept for export. Three checks in pipeline._process_clip share
   # this threshold.
   min_track_speech_overlap: 0.3
+
+# ===== Performance (machine-specific resource caps) =====
+# Tune these to the PROCESSING machine's specs. Current values: laptop
+# i7-12650H (10 cores/16 threads) + RTX 3050 Ti 4GB + 16GB RAM.
+performance:
+  # CPU threads for torch ops on the analysis (GPU) thread. Uncapped, torch
+  # grabs every core and starves the export lane. 0 = all cores.
+  torch_cpu_threads: 6
+  # Threads per ffmpeg/x264 encode in the export lane; uncapped, every
+  # encode spikes all cores at once. 0 = ffmpeg default.
+  encoder_threads: 4
+  # Thermal breather (ms) after each clip's GPU phase — raise to ~200-500 if
+  # the GPU sits at 87°C+ for long runs (laptop cooling). 0 = off.
+  gpu_pause_ms: 0
 
 # ===== Export Settings =====
 export:

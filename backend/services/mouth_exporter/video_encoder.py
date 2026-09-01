@@ -12,10 +12,19 @@ kept only as an escape hatch.
 
 import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from loguru import logger
+
+# Process-wide x264 thread cap (performance.encoder_threads in config.yaml,
+# applied by VSRPipeline at startup); 0 = ffmpeg's default (all cores).
+# Uncapped x264 grabs every core per encode and starves the analysis thread.
+ENCODER_THREADS = 0
+
+
+def _thread_args() -> List[str]:
+    return ["-threads", str(ENCODER_THREADS)] if ENCODER_THREADS > 0 else []
 
 
 class FfmpegPipeWriter:
@@ -76,6 +85,7 @@ class FfmpegPipeWriter:
             "-c:v", codec,
             "-preset", preset,
             "-crf", str(crf),
+            *_thread_args(),
             "-pix_fmt", "yuv420p",
             "-r", str(fps),
             str(self.output_path),
@@ -163,6 +173,7 @@ include_audio: bool,
                 '-c:v', video_codec,
                 '-preset', video_preset,
                 '-crf', str(video_crf),
+                *_thread_args(),
                 '-c:a', 'aac',
                 '-ar', '16000',
                 '-ac', '1',
@@ -176,6 +187,7 @@ include_audio: bool,
                 '-c:v', video_codec,
                 '-preset', video_preset,
                 '-crf', str(video_crf),
+                *_thread_args(),
                 '-an',
                 str(output_path)
             ]

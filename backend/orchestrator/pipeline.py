@@ -56,6 +56,21 @@ class VSRPipeline:
     def __init__(self, config: PipelineConfig):
         self.config = config
 
+        # performance.torch_cpu_threads: cap torch's CPU pool so the
+        # analysis thread leaves cores free for the export lane + system
+        # (uncapped torch grabs every core and starves the encoder).
+        if config.torch_cpu_threads > 0:
+            import torch as _torch
+            _torch.set_num_threads(config.torch_cpu_threads)
+            logger.info(f"torch CPU threads capped at {config.torch_cpu_threads}")
+
+        # performance.encoder_threads: cap each ffmpeg/x264 encode in the
+        # export lane (process-wide setting in the encoder module).
+        if config.encoder_threads > 0:
+            from services.mouth_exporter import video_encoder as _venc
+            _venc.ENCODER_THREADS = config.encoder_threads
+            logger.info(f"x264 encoder threads capped at {config.encoder_threads}")
+
         for directory in [
             config.raw_dir, config.clips_dir,
             config.processed_dir, config.metadata_dir, config.temp_dir,
@@ -351,6 +366,11 @@ class VSRPipeline:
                     next_index += 1
                     pending.append((clip, future))
 
+                    # performance.gpu_pause_ms: optional thermal breather
+                    # between clips (laptop cooling can't shed sustained load).
+                    if self.config.gpu_pause_ms > 0:
+                        time.sleep(self.config.gpu_pause_ms / 1000.0)
+
                 while pending:
                     drain_one(block=True)
             except PipelineCancelled:
@@ -557,6 +577,12 @@ class VSRPipeline:
         try:
             speech_regions = self.services.splitter.detect_speech_regions(audio_path)
             words = self.services.transcriber.transcribe_full(audio_path)
+
+            # Free Whisper + alignment VRAM BEFORE diarization loads: on a
+            # 4 GB card the three stacks together spill into shared memory
+            # (PCIe, ~10x slower) — they never need to coexist.
+            if self.config.whisper_unload_after_segmentation:
+                self.services.transcriber.unload()
 
             if self.config.diarization_enabled and words:
                 # WHO speaks WHEN — labels enable speaker-turn boundaries.
