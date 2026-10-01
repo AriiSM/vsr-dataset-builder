@@ -384,11 +384,15 @@ def vocabulary(db: CatalogDatabase) -> dict:
 
     # Fallback (old semantics): segments with no word rows contribute their
     # duration spread evenly over the transcript words.
+    # fetchall() releases the SQLite SHARED lock immediately; streaming
+    # iteration would hold it for the entire Python loop, starving the
+    # pipeline writer in DELETE journal mode (Docker bind-mount).
     for row in db.connection.execute(
             "SELECT s.segment_id, s.text, s.duration FROM segments s"
             " WHERE COALESCE(s.review_status, '') != 'rejected'"
             " AND NOT EXISTS (SELECT 1 FROM words w"
-            "                 WHERE w.segment_id = s.segment_id)"):
+            "                 WHERE w.segment_id = s.segment_id)"
+            ).fetchall():
         text = (row["text"] or "").strip()
         if not text:
             continue

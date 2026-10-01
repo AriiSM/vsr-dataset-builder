@@ -228,7 +228,7 @@ class CatalogDatabase:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=check_same_thread)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         # WAL needs shared memory (the -shm file, via mmap) — impossible
         # ACROSS containers on Windows bind mounts (9p/gRPC-FUSE). Worse, the
         # try-WAL-then-fallback dance only works for the FIRST process to open
@@ -248,7 +248,7 @@ class CatalogDatabase:
                 self._conn = sqlite3.connect(str(self.db_path),
                                              check_same_thread=check_same_thread)
                 self._conn.row_factory = sqlite3.Row
-                self._conn.execute("PRAGMA busy_timeout=5000")
+                self._conn.execute("PRAGMA busy_timeout=30000")
                 self._conn.execute("PRAGMA journal_mode=DELETE")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
