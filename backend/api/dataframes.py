@@ -15,9 +15,15 @@ from vsr_shared.catalog_db import CatalogDatabase
 
 
 def segments_frame(db: CatalogDatabase) -> pd.DataFrame:
-    """All segments + per-video region, CSV-shaped (syncnet_conf etc.)."""
+    """Stats-relevant columns only — skips blobs/paths and raw text variants."""
     rows = db.connection.execute(
-        "SELECT s.*, COALESCE(NULLIF(v.region, ''), 'UNKNOWN') AS region"
+        "SELECT s.segment_id, s.video_id, s.review_status,"
+        " s.duration, s.num_words, s.num_chars, s.text,"
+        " s.asd_score, s.syncnet_conf,"
+        " s.whisper_conf, s.whisper_conf_min,"
+        " s.wer, s.quality_tier, s.speaker_id,"
+        " s.transcript_edited, s.trimmed,"
+        " COALESCE(NULLIF(v.region, ''), 'UNKNOWN') AS region"
         " FROM segments s LEFT JOIN videos v USING (video_id)"
         " ORDER BY s.video_id, s.segment_id"
     ).fetchall()

@@ -16,11 +16,25 @@ What CHANGED under the hood (invisible to the UI):
 """
 
 import math
+import time as _time
 
 import pandas as pd
 
 from vsr_shared.catalog_db import CatalogDatabase
 from api.dataframes import segments_frame, videos_frame
+
+_cache: dict = {}
+_CACHE_TTL = 20.0  # seconds — stats change only when a new segment is written
+
+
+def _cached(key: str, fn, db: CatalogDatabase):
+    now = _time.monotonic()
+    entry = _cache.get(key)
+    if entry and (now - entry[0]) < _CACHE_TTL:
+        return entry[1]
+    result = fn(db)
+    _cache[key] = (now, result)
+    return result
 
 
 def _conf_level(conf_min, conf_mean) -> int:
@@ -232,15 +246,22 @@ def stats_segments(db: CatalogDatabase) -> dict:
                     pd.to_numeric(sub["duration"], errors="coerce").fillna(0).sum()), 1),
             }
 
-    # Conf distribution from the stored confidences (pipeline formula) —
-    # no annotation files touched.
-    conf_dist = {"1": 0, "2": 0, "3": 0, "unknown": 0}
-    for _, row in seg_df.iterrows():
-        conf_min, conf_mean = row.get("whisper_conf_min"), row.get("whisper_conf")
-        if conf_min is None and conf_mean is None:
-            conf_dist["unknown"] += 1
-        else:
-            conf_dist[str(_conf_level(conf_min, conf_mean))] += 1
+    # Conf distribution — vectorized (iterrows over thousands of segments is ~100x slower).
+    _cm = pd.to_numeric(
+        seg_df["whisper_conf_min"] if "whisper_conf_min" in seg_df.columns
+        else pd.Series(dtype=float), errors="coerce")
+    _ca = pd.to_numeric(
+        seg_df["whisper_conf"] if "whisper_conf" in seg_df.columns
+        else pd.Series(dtype=float), errors="coerce")
+    _both_valid = _cm.notna() & _ca.notna()
+    _tier3 = _both_valid & (_cm >= 0.7) & (_ca >= 0.9)
+    _tier2 = _both_valid & (~_tier3) & (_cm >= 0.5) & (_ca >= 0.7)
+    conf_dist = {
+        "3": int(_tier3.sum()),
+        "2": int(_tier2.sum()),
+        "1": int((~_tier3 & ~_tier2).sum()),
+        "unknown": 0,
+    }
 
     word_freq: dict = {}
     for text in seg_df["text"].dropna().astype(str):
@@ -336,11 +357,17 @@ def distributions(db: CatalogDatabase) -> dict:
         series = df[col]
         return int(series.isna().sum() + (series.astype(str) == "").sum())
 
-    conf_inputs = df[["whisper_conf_min", "whisper_conf"]].notna().all(axis=1)
-    conf1_count = int(sum(
-        _conf_level(r["whisper_conf_min"], r["whisper_conf"]) == 1
-        for _, r in df[conf_inputs].iterrows()))
-    scanned = int(conf_inputs.sum())
+    _cm = pd.to_numeric(
+        df["whisper_conf_min"] if "whisper_conf_min" in df.columns
+        else pd.Series(dtype=float), errors="coerce")
+    _ca = pd.to_numeric(
+        df["whisper_conf"] if "whisper_conf" in df.columns
+        else pd.Series(dtype=float), errors="coerce")
+    _valid = _cm.notna() & _ca.notna()
+    scanned = int(_valid.sum())
+    _t3 = _valid & (_cm >= 0.7) & (_ca >= 0.9)
+    _t2 = _valid & (~_t3) & (_cm >= 0.5) & (_ca >= 0.7)
+    conf1_count = int((~_t3 & ~_t2).sum())
 
     def _pct(value, denom):
         return round(100.0 * value / denom, 1) if denom else 0.0
@@ -414,3 +441,24 @@ def vocabulary(db: CatalogDatabase) -> dict:
               "duration": round(e["duration"], 2)} for w, e in counts.items()]
     words.sort(key=lambda x: x["samples"], reverse=True)
     return {"words": words, "total_unique": len(words)}
+
+
+# ── Cached entry-points called by the router ──────────────────────────────
+
+def get_stats(db: CatalogDatabase) -> dict:
+    def _compute(d):
+        videos = stats_videos(d)
+        payload = {"videos": videos, "segments": stats_segments(d)}
+        if "total_duration_h" in videos:
+            payload["videos"]["total_duration_s"] = round(
+                videos["total_duration_h"] * 3600, 2)
+        return payload
+    return _cached("stats", _compute, db)
+
+
+def get_distributions(db: CatalogDatabase) -> dict:
+    return _cached("distributions", distributions, db)
+
+
+def get_vocabulary(db: CatalogDatabase) -> dict:
+    return _cached("vocabulary", vocabulary, db)

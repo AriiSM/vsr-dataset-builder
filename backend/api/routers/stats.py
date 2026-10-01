@@ -16,22 +16,14 @@ router = APIRouter(prefix="/api", tags=["stats"])
 
 @router.get("/stats")
 def stats(db: CatalogDatabase = Depends(get_db)):
-    videos = stats_service.stats_videos(db)
-    payload = {
-        "videos": videos,
-        "segments": stats_service.stats_segments(db),
-    }
-    if "total_duration_h" in videos:
-        payload["videos"]["total_duration_s"] = round(
-            videos["total_duration_h"] * 3600, 2)
-    return payload
+    return stats_service.get_stats(db)
 
 
 @router.get("/stats/distributions")
 def stats_distributions(db: CatalogDatabase = Depends(get_db)):
-    return stats_service.distributions(db)
+    return stats_service.get_distributions(db)
 
 
 @router.get("/vocabulary")
 def vocabulary(db: CatalogDatabase = Depends(get_db)):
-    return stats_service.vocabulary(db)
+    return stats_service.get_vocabulary(db)

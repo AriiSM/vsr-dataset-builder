@@ -260,6 +260,12 @@ class CatalogDatabase:
         self.jobs = JobsRepo(self._conn)
 
     def _init_schema(self):
+        # Fast path: check version with a SHARED lock (compatible with concurrent
+        # readers AND writer RESERVED locks). Only run the expensive DDL (which
+        # needs EXCLUSIVE) when the schema is actually out of date.
+        current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if current >= SCHEMA_VERSION:
+            return
         with self._conn:
             self._conn.executescript(_SCHEMA)
             current = self._conn.execute("PRAGMA user_version").fetchone()[0]

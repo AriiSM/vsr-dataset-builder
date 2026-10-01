@@ -18,6 +18,8 @@ from pathlib import Path
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(_BACKEND_DIR), str(_BACKEND_DIR / "shared")]
 
+from contextlib import asynccontextmanager  # noqa: E402
+
 from fastapi import FastAPI  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
@@ -32,10 +34,37 @@ from api.routers import (  # noqa: E402
     videos,
 )
 
+# Number of connections to keep warm — Dashboard loads 5 requests in parallel.
+_POOL_WARMUP = 6
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Pre-create DB connections so the first parallel batch of requests never
+    # has to create new ones (connection creation runs _init_schema which
+    # acquires a SHARED lock; creating 5 at once still races for the lock).
+    from api.db import get_db
+    from vsr_shared.catalog_db import CatalogDatabase
+
+    settings = get_settings()
+    conns = []
+    for _ in range(_POOL_WARMUP):
+        try:
+            conns.append(
+                CatalogDatabase(settings.db_path, check_same_thread=False))
+        except Exception:
+            break
+    from api import db as _db_module
+    for c in conns:
+        _db_module._pool.put(c)
+    yield
+
+
 app = FastAPI(
     title="Romanian VSR Dataset API",
     description="Catalog, review and job control for the VSR pipeline.",
     version="1.0",
+    lifespan=lifespan,
 )
 
 app.include_router(jobs.router)
