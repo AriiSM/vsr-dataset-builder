@@ -559,7 +559,7 @@ def cmd_bulk_import(args):
     _apply_cookie_overrides(pipeline, args)
     downloader: YouTubeDownloader = pipeline.services.downloader
 
-    # Sursa de adevăr: tabela videos din dataset.db (CSV-urile sunt exporturi).
+    # Source of truth: the videos table in dataset.db (CSVs are exports only).
     db_rows = pipeline.catalog.db.videos.all()
     existing_ids = {str(r["video_id"]) for r in db_rows}
     existing_urls = {str(r.get("youtube_url") or "") for r in db_rows} - {""}
@@ -595,15 +595,15 @@ def cmd_bulk_import(args):
     for i, entry in enumerate(urls, 1):
         given_id, url = parse_import_line(entry)
         if url is None or (strict_pairs and given_id is None):
-            expected = "'md_001 https://...'" if strict_pairs else "'URL' sau 'id URL'"
-            logger.error(f"  Linie nerecunoscută (aștept {expected}): {entry!r}")
+            expected = "'md_001 https://...'" if strict_pairs else "'URL' or 'id URL'"
+            logger.error(f"  Unrecognised line (expected {expected}): {entry!r}")
             failed += 1
             continue
         logger.info(f"[{i}/{total}] Importing: {url}"
-                    + (f" (id dat: {given_id})" if given_id else ""))
+                    + (f" (given id: {given_id})" if given_id else ""))
 
         if given_id and given_id in existing_ids:
-            logger.warning(f"  {given_id} e deja înregistrat — sărit")
+            logger.warning(f"  {given_id} already registered — skipped")
             skipped += 1
             continue
 
@@ -670,14 +670,14 @@ def cmd_bulk_import(args):
                 row["status"] = ProcessingStatus.PENDING.value
                 added += 1
                 registered += 1
-                logger.info(f"  {video_id}: raw pe disc, integritate OK "
-                            f"[{properties}] — fără descărcare → pending")
+                logger.info(f"  {video_id}: raw file on disk, integrity OK "
+                            f"[{properties}] — no download needed → pending")
             except Exception as e:
                 row["status"] = ProcessingStatus.FAILED.value
                 row["error_message"] = f"raw file failed integrity check: {e}"[:500]
                 failed += 1
-                logger.error(f"  {video_id}: raw pe disc dar PICĂ verificarea "
-                             f"ffprobe ({e}) — marcat failed, fișierul rămâne")
+                logger.error(f"  {video_id}: raw file on disk but ffprobe check FAILED "
+                             f"({e}) — marked failed, file kept")
             _upsert_video_row(pipeline, video_id, row)
             existing_ids.add(video_id)
             existing_urls.add(url)
@@ -709,7 +709,7 @@ def cmd_bulk_import(args):
             failed += 1
             logger.error(f"  {video_id} download error: {e}")
 
-        # Row-ul intră imediat în DB — UI-ul îl vede în timp real
+        # Row is written immediately so the UI sees it in real time.
         _upsert_video_row(pipeline, video_id, row)
         existing_ids.add(video_id)
         existing_urls.add(url)
@@ -723,8 +723,8 @@ def cmd_bulk_import(args):
     print(f"  Downloaded     : {added}")
     print(f"  Failed         : {failed}")
     print(f"  Skipped (dup.) : {skipped}")
-    print(f"  Pre-downloaded : {registered}  (mapate fără descărcare)")
-    print(f"  Catalog        : dataset.db (CSV doar prin export_catalog.py)")
+    print(f"  Pre-downloaded : {registered}  (mapped without download)")
+    print(f"  Catalog        : dataset.db (CSV only via export_catalog.py)")
 
 
 
@@ -804,7 +804,7 @@ Examples:
     # batch
     p_batch = subs.add_parser("batch", help="Process batch from Excel")
     p_batch.add_argument("excel", nargs="?", default="",
-                         help="ignorat — selecția vine din dataset.db")
+                         help="ignored — selection comes from dataset.db")
     p_batch.add_argument("--limit", type=int)
     p_batch.add_argument("--status", nargs="+", default=["pending"])
     p_batch.add_argument(
@@ -827,7 +827,7 @@ Examples:
     # stats
     p_stats = subs.add_parser("stats", help="Show dataset statistics")
     p_stats.add_argument("excel", nargs="?", default="",
-                         help="ignorat — statisticile vin din dataset.db")
+                         help="ignored — statistics come from dataset.db")
     p_stats.add_argument("--json", action="store_true",
                          help="Emit machine-readable JSON instead of pretty text.")
 
@@ -848,7 +848,7 @@ Examples:
         help="Resume all interrupted videos (status=processing or failed)",
     )
     p_resume_batch.add_argument("excel", nargs="?", default="",
-                                help="ignorat — selecția vine din dataset.db")
+                                help="ignored — selection comes from dataset.db")
     p_resume_batch.add_argument("--limit", type=int, help="Max videos to resume")
     p_resume_batch.add_argument(
         "--video-id",
@@ -863,7 +863,7 @@ Examples:
         help="Download/map YouTube URLs into the catalog (dataset.db)",
     )
     p_bulk.add_argument("excel", nargs="?", default="",
-                        help="ignorat — rândurile intră în dataset.db")
+                        help="ignored — rows go into dataset.db")
     p_bulk.add_argument(
         "--urls", nargs="+", metavar="URL",
         help="YouTube URLs to import (one or more)",

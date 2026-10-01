@@ -13,6 +13,7 @@ Collaborators (one file each, one responsibility each):
     ClipProcessor     (clip_processor.py)     — the per-clip cascade
 """
 
+import math
 import time
 import traceback
 from collections import deque

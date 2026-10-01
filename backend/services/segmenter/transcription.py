@@ -132,14 +132,22 @@ class WhisperTranscriber:
     def _load_model(self):
         """Lazy load Whisper model."""
         if self._model is None:
+            import gc
             import whisperx
-            
+
+            # Face models (RetinaFace, TalkNet, SyncNet) stay resident between
+            # videos. Clearing the CUDA allocator cache before loading Whisper
+            # prevents OOM from accumulated fragmentation on 4 GB cards.
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             logger.info(f"Loading Whisper model: {self.model_name}")
             self._model = whisperx.load_model(
                 self.model_name,
                 self.device,
                 compute_type=self.compute_type,
-                language=self.language
+                language=self.language,
             )
             logger.info("Whisper model loaded")
     

@@ -41,7 +41,7 @@ def verify(catalog_dir: Path, processed_dir: Path, video_ids=None) -> int:
     segments = db.segments.all()
     if video_ids:
         segments = [s for s in segments if s["video_id"] in set(video_ids)]
-    print(f"Catalog: {len(segments)} segment(s) în dataset.db")
+    print(f"Catalog: {len(segments)} segment(s) in dataset.db")
 
     # 1. DB → disk: every segment's artifacts exist
     missing = []
@@ -50,16 +50,16 @@ def verify(catalog_dir: Path, processed_dir: Path, video_ids=None) -> int:
         for folder, ext, required in _ARTIFACTS:
             path = base / folder / f"{seg['segment_id']}{ext}"
             if required and not path.exists():
-                missing.append(f"{seg['segment_id']}: lipsă {folder}{ext}")
+                missing.append(f"{seg['segment_id']}: missing {folder}{ext}")
     if missing:
         problems += len(missing)
-        print(f"✗ {len(missing)} artefact(e) lipsă pe disc:")
+        print(f"✗ {len(missing)} missing artifact(s) on disk:")
         for m in missing[:20]:
             print(f"    {m}")
         if len(missing) > 20:
-            print(f"    … și încă {len(missing) - 20}")
+            print(f"    … and {len(missing) - 20} more")
     else:
-        print("✓ toate artefactele segmentelor din DB există pe disc")
+        print("✓ all segment artifacts exist on disk")
 
     # 2. disk → DB: orphan files
     known = {s["segment_id"] for s in db.segments.all()}
@@ -76,11 +76,11 @@ def verify(catalog_dir: Path, processed_dir: Path, video_ids=None) -> int:
                     orphans.append(str(mp4.relative_to(processed_dir)))
     if orphans:
         problems += len(orphans)
-        print(f"✗ {len(orphans)} fișier(e) orfane (pe disc, fără rând în DB):")
+        print(f"✗ {len(orphans)} orphan file(s) on disk (no DB row):")
         for o in orphans[:20]:
             print(f"    {o}")
     else:
-        print("✓ zero fișiere orfane")
+        print("✓ no orphan files")
 
     # 3. per-video counts vs videos.total_segments
     mismatches = []
@@ -97,11 +97,11 @@ def verify(catalog_dir: Path, processed_dir: Path, video_ids=None) -> int:
                 f"{video['total_segments']} vs segments={actual}")
     if mismatches:
         problems += len(mismatches)
-        print(f"✗ {len(mismatches)} nepotriviri de numărători:")
+        print(f"✗ {len(mismatches)} count mismatch(es):")
         for m in mismatches:
             print(f"    {m}")
     else:
-        print("✓ numărătorile per video corespund")
+        print("✓ per-video counts match")
 
     # 4. words coverage
     no_words = [
@@ -109,10 +109,10 @@ def verify(catalog_dir: Path, processed_dir: Path, video_ids=None) -> int:
         if not db.segments.words_for(s["segment_id"])
     ]
     if no_words:
-        print(f"⚠ {len(no_words)} segment(e) fără rânduri în words "
-              f"(annotation neparsabil la momentul scrierii)")
+        print(f"⚠ {len(no_words)} segment(s) with no rows in words "
+              f"(annotation unparsable at write time)")
     else:
-        print("✓ fiecare segment are cuvinte în words")
+        print("✓ every segment has word rows")
 
     # 5. summary
     overview = db.connection.execute("SELECT * FROM dataset_overview").fetchone()

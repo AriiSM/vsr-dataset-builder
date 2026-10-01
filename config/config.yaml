@@ -48,7 +48,7 @@ audio:
     # memory (PCIe, ~10x slower) during segmentation. Revert to "float16"
     # only on cards with 8GB+.
     compute_type: "int8_float16"
-    batch_size: 8         # 4GB VRAM — reduce to 4 if you hit OOM errors
+    batch_size: 4         # 4GB VRAM — 8 caused OOM once face models occupied VRAM
     # Free GPU memory once full-video transcription is done (sentence strategy),
     # before RetinaFace / TalkNet are loaded.
     unload_after_segmentation: true

@@ -181,8 +181,8 @@ def compat_bulk_import(body: dict, db: CatalogDatabase = Depends(get_db)):
                if not (len(u.split()) == 2 and "://" in u.split()[1])]
         if bad:
             raise HTTPException(
-                400, f"pre_downloaded: fiecare linie trebuie să fie "
-                     f"'md_001 https://...' — prima nepotrivită: {bad[0]!r}")
+                400, f"pre_downloaded: each line must be "
+                     f"'md_001 https://...' — first bad line: {bad[0]!r}")
     params = {
         "pre_downloaded": pre_downloaded,
         "urls": urls,

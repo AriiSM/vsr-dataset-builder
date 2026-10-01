@@ -90,8 +90,8 @@ def _download(url: str, destination: Path):
 def _fetch_direct(models_dir: Path, name: str, entry: dict) -> bool:
     target = _target(models_dir, entry)
     if entry.get("url") is None:
-        print(f"  ✗ {name}: fără URL — copiază manual fișierul la {target}"
-              f" (sau urcă-l în repo-ul tău HF și pune link-ul în models.yaml)")
+        print(f"  ✗ {name}: no URL — copy the file manually to {target}"
+              f" (or upload it to your HF repo and set the URL in models.yaml)")
         return False
     if entry["kind"] == "archive":
         with tempfile.TemporaryDirectory() as tmp:
@@ -121,30 +121,30 @@ def _fetch_hub(name: str, entry: dict) -> bool:
             try:
                 from faster_whisper.utils import download_model
             except ImportError:
-                print(f"  – {name}: faster-whisper neinstalat aici — "
-                      "rulează pe mașina de procesare")
+                print(f"  – {name}: faster-whisper not installed here — "
+                      "run on the processing machine")
                 return False
-            print(f"    pre-descarc whisper {entry['model_name']} …")
+            print(f"    pre-downloading whisper {entry['model_name']} …")
             download_model(entry["model_name"])
         elif hub == "torch_hub":
             try:
                 import torch
             except ImportError:
-                print(f"  – {name}: torch neinstalat aici — "
-                      "rulează pe mașina de procesare")
+                print(f"  – {name}: torch not installed here — "
+                      "run on the processing machine")
                 return False
-            print(f"    pre-descarc {entry['repo']} …")
+            print(f"    pre-downloading {entry['repo']} …")
             torch.hub.load(entry["repo"], "silero_vad", trust_repo=True)
         elif hub == "pyannote":
-            print(f"  – {name}: gated pe HF (token) — se descarcă la prima"
-                  " rulare a pipeline-ului; doctor verifică token-ul")
+            print(f"  – {name}: gated on HF (token) — downloads on first"
+                  " pipeline run; doctor checks the token")
             return True
         else:
-            print(f"  ✗ {name}: hub necunoscut '{hub}'")
+            print(f"  ✗ {name}: unknown hub '{hub}'")
             return False
         return True
     except Exception as e:
-        print(f"  ✗ {name}: pre-download eșuat: {e}")
+        print(f"  ✗ {name}: pre-download failed: {e}")
         return False
 
 
@@ -171,37 +171,37 @@ def run(models_dir: Path, check_only: bool, pin: bool, only: str = None) -> int:
         state = _verify(target, entry)
 
         if state == "ok":
-            print(f"  ✓ {name}: prezent + hash corect")
+            print(f"  ✓ {name}: present + hash correct")
             continue
         if state == "unpinned":
             actual = (sha256_of_tree(target) if target.is_dir()
                       else sha256_of(target))
             if pin:
                 pinned_updates[name] = actual
-                print(f"  ✓ {name}: prezent — hash fixat {actual[:16]}…")
+                print(f"  ✓ {name}: present — hash pinned {actual[:16]}…")
             else:
-                print(f"  ⚠ {name}: prezent, dar hash NEFIXAT"
-                      f" (rulează --pin ca să-l înregistrezi)")
+                print(f"  ⚠ {name}: present but hash NOT PINNED"
+                      f" (run --pin to record it)")
             continue
         if state == "mismatch":
             problems += 1
-            print(f"  ✗ {name}: HASH DIFERIT de manifest — fișier corupt sau"
-                  " înlocuit; șterge-l și re-rulează fetch")
+            print(f"  ✗ {name}: HASH MISMATCH — file corrupted or replaced;"
+                  " delete it and re-run fetch")
             continue
 
         # missing
         if check_only or pin:
             problems += required
-            print(f"  {'✗' if required else '–'} {name}: lipsă ({target})")
+            print(f"  {'✗' if required else '–'} {name}: missing ({target})")
             continue
         if _fetch_direct(models_dir, name, entry):
             state = _verify(target, entry)
             if state == "mismatch":
                 problems += 1
-                print(f"  ✗ {name}: hash diferit DUPĂ download")
+                print(f"  ✗ {name}: hash mismatch AFTER download")
             else:
-                print(f"  ✓ {name}: descărcat"
-                      + (" (hash nefixat — rulează --pin)" if state == "unpinned" else ""))
+                print(f"  ✓ {name}: downloaded"
+                      + (" (hash not pinned — run --pin)" if state == "unpinned" else ""))
         else:
             problems += required
 

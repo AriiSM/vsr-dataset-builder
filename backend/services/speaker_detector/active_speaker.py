@@ -105,7 +105,7 @@ class TalkNetASD:
                 raise RuntimeError(
                     "TalkNet-ASD is not installed "
                     "(git clone https://github.com/TaoRuijie/TalkNet-ASD.git && "
-                    "clone TalkNet-ASD în rădăcina repo-ului — fără pip install). "
+                    "clone TalkNet-ASD into the repo root — no pip install needed). "
                     "Set asd.allow_fallback: true only if you accept "
                     "motion-correlation scores instead of real ASD."
                 ) from None
