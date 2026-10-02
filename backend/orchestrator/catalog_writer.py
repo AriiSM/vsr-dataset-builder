@@ -78,7 +78,7 @@ class CatalogWriter:
             "segment_id": seg.segment_id,
             "video_id": seg.video_id,
             "clip_id": "_".join(seg.segment_id.split("_")[:-1]),
-            "speaker_id": seg.speaker_id or f"{seg.video_id}_spk0",
+            "speaker_id": seg.speaker_id or f"{seg.video_id}_spk_unknown",
             "track_id": seg.track_id,
             "start_time": seg.start_time,
             "end_time": seg.end_time,

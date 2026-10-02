@@ -134,7 +134,8 @@ class VSRPipeline:
             "audio_speaker_label": seg.audio_speaker_label if seg else None,
             "identity": clip_result.identity,
         }
-        checkpoint["segment_count"] = len(exported_segments) + (1 if seg else 0)
+        new_count = len(exported_segments) + (1 if seg else 0)
+        checkpoint["segment_count"] = max(checkpoint.get("segment_count", 0), new_count)
         checkpoint["video_id"] = video_id
         self.checkpoints.write(video_id, checkpoint)
 
@@ -288,7 +289,10 @@ class VSRPipeline:
             # indices ordered; the 2-in-flight cap bounds RAM.
             total_clips = len(clips)
             use_overlap = self.config.gpu_cpu_overlap
-            next_index = segment_index
+            # max() guard: if files were missing during recovery,
+            # len(exported_segments) < segment_count; use the higher value
+            # so new clips never receive an index that was already committed.
+            next_index = max(segment_index, len(exported_segments))
             export_pool = (
                 ThreadPoolExecutor(max_workers=1, thread_name_prefix="export-lane")
                 if use_overlap else None
@@ -337,7 +341,7 @@ class VSRPipeline:
                             outcome = self.clip_processor.analyze(clip, video_id)
                         else:
                             outcome = self.clip_processor.process(
-                                clip, video_id, len(exported_segments))
+                                clip, video_id, next_index)
                     except RuntimeError:
                         # Environment/config problems (missing models, tokens) —
                         # every clip would fail identically; abort loudly instead.
@@ -354,6 +358,8 @@ class VSRPipeline:
                             video_id, clip, outcome, checkpoint,
                             total_clips, exported_segments,
                         )
+                        if outcome.exported_segment:
+                            next_index += 1
                         continue
 
                     # Passed every gate — hand to the export lane. The index
@@ -380,8 +386,11 @@ class VSRPipeline:
                 while pending:
                     try:
                         drain_one(block=True)
-                    except Exception:
-                        break
+                    except Exception as e:
+                        logger.warning(
+                            f"Drain error on cancel for {video_id}: {e} "
+                            f"— clip will be re-processed on resume"
+                        )
                 raise
             finally:
                 if export_pool is not None:
@@ -433,7 +442,7 @@ class VSRPipeline:
             # by _assign_speaker_identities.
             try:
                 seen_speakers = {
-                    seg.speaker_id or f"{seg.video_id}_spk0"
+                    seg.speaker_id or f"{seg.video_id}_spk_unknown"
                     for seg in exported_segments
                 }
                 for sid in seen_speakers:
