@@ -714,6 +714,27 @@ class VSRPipeline:
         return results
 
     # batch processing
+    def _prefetch_download(
+        self, video_id: str, url: str, verify_cc: bool
+    ) -> Optional[Path]:
+        """Best-effort background download for the next video in the batch.
+
+        Called from a dedicated prefetch thread while the GPU processes the
+        current video, so the next video's raw file is ready on disk before
+        process_video() reaches Step 1. Failures are logged and swallowed —
+        process_video() will retry the download through its normal path.
+        """
+        raw_path = self.config.raw_dir / f"{video_id}.mp4"
+        if raw_path.exists():
+            return raw_path
+        if not url:
+            return None
+        try:
+            return self.services.downloader.download(url, video_id, verify_cc=verify_cc)
+        except Exception as e:
+            logger.warning(f"Prefetch download failed for {video_id}: {e}")
+            return None
+
     def process_batch(
         self,
         excel_path: Path,
@@ -726,6 +747,11 @@ class VSRPipeline:
         If video_ids is given, only those rows are processed (status_filter
         is ignored). `excel_path` is accepted for call-site compatibility
         and IGNORED — the DB is the source of truth (storage v2).
+
+        Download prefetching: while the GPU processes video N, a background
+        thread downloads video N+1 so process_video() skips the download
+        wait entirely. The prefetch is best-effort — any failure falls back
+        to the normal download path inside process_video().
         """
         rows = self.catalog.db.videos.select_for_batch(
             status_filter=status_filter, video_ids=video_ids, limit=limit)
@@ -733,25 +759,62 @@ class VSRPipeline:
         results: List[ProcessingResult] = []
         total = len(rows)
 
-        for i, row in enumerate(rows, start=1):
-            video_id = str(row["video_id"])
-            url = str(row.get("youtube_url") or "")
+        prefetch_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="prefetch-dl"
+        )
+        prefetch_future = None
+        prefetch_video_id: Optional[str] = None
 
-            license_val = str(row.get("license") or "unverified").strip()
-            verify_cc = license_val in ("", "unverified")
+        try:
+            for i, row in enumerate(rows, start=1):
+                video_id = str(row["video_id"])
+                url = str(row.get("youtube_url") or "")
+                license_val = str(row.get("license") or "unverified").strip()
+                verify_cc = license_val in ("", "unverified")
 
-            logger.info(f"Processing video {i}/{total}: {video_id}")
-            self._check_cancel(video_id)
-            self._report_progress(
-                video_id=video_id, stage="batch", video_num=i, total_videos=total,
-            )
+                # Wait for this video's prefetch if one was submitted
+                if prefetch_video_id == video_id and prefetch_future is not None:
+                    try:
+                        prefetch_future.result()
+                        logger.debug(f"Prefetch complete for {video_id}")
+                    except Exception as e:
+                        logger.warning(
+                            f"Prefetch for {video_id} failed ({e})"
+                            f" — will download normally"
+                        )
+                    prefetch_future = None
+                    prefetch_video_id = None
 
-            result = self.process_video(
-                video_id,
-                url,
-                verify_cc=verify_cc,
-            )
-            results.append(result)
+                # Submit prefetch for the NEXT video before starting this one —
+                # runs concurrently with the GPU processing of the current video.
+                if i < total:
+                    next_row = rows[i]  # rows is 0-indexed; rows[i] = video i+1
+                    next_id = str(next_row["video_id"])
+                    next_url = str(next_row.get("youtube_url") or "")
+                    next_license = str(next_row.get("license") or "unverified").strip()
+                    next_verify_cc = next_license in ("", "unverified")
+                    if next_url and not (self.config.raw_dir / f"{next_id}.mp4").exists():
+                        prefetch_future = prefetch_pool.submit(
+                            self._prefetch_download, next_id, next_url, next_verify_cc,
+                        )
+                        prefetch_video_id = next_id
+                        logger.debug(f"Prefetch started for {next_id}")
+
+                logger.info(f"Processing video {i}/{total}: {video_id}")
+                self._check_cancel(video_id)
+                self._report_progress(
+                    video_id=video_id, stage="batch", video_num=i, total_videos=total,
+                )
+
+                result = self.process_video(video_id, url, verify_cc=verify_cc)
+                results.append(result)
+
+        finally:
+            # Cancel any pending (not yet started) prefetch; running downloads
+            # complete in the background — the file will be ready for next run.
+            if prefetch_future is not None:
+                prefetch_future.cancel()
+            prefetch_pool.shutdown(wait=False)
 
         return results
 
