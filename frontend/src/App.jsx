@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { useLocalStorage } from './hooks/useLocalStorage.js';
 import { Toaster } from './components/toast.jsx';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
@@ -14,16 +14,28 @@ import { ReviewTab } from './tabs/review/ReviewTab.jsx';
 const IS_DEMO_MODE = new URLSearchParams(window.location.search).has('demo');
 
 /**
- * The main tabs, in one nav: analysing the dataset first (what is used
- * most), then curating and running the pipeline.
+ * The pages, grouped by what the user is doing: looking at the dataset,
+ * curating it, or producing more of it.
  */
-const TABS = [
-  { id: 'dashboard', label: 'Dashboard' },
-  { id: 'data',      label: 'Data' },
-  { id: 'explorer',  label: 'Explorer' },
-  { id: 'review',    label: 'Review' },
-  { id: 'process',   label: 'Process' },
+const NAV_GROUPS = [
+  {
+    label: 'Dataset',
+    items: [
+      { id: 'dashboard', label: 'Overview', icon: 'overview' },
+      { id: 'data',      label: 'Data',     icon: 'table' },
+      { id: 'explorer',  label: 'Explorer', icon: 'grid' },
+    ],
+  },
+  {
+    label: 'Curation',
+    items: [{ id: 'review', label: 'Review', icon: 'check' }],
+  },
+  {
+    label: 'Pipeline',
+    items: [{ id: 'process', label: 'Process', icon: 'play' }],
+  },
 ];
+const TABS = NAV_GROUPS.flatMap((g) => g.items);
 const TAB_IDS = TABS.map((t) => t.id);
 
 /**
@@ -37,7 +49,7 @@ function normalizeTabId(id) {
 }
 
 /**
- * Root component: the header with tabs + the five pages.
+ * Root component: the sidebar navigation + the five pages.
  *
  * All tabs stay permanently mounted (hidden via CSS) so their state is not
  * lost when switching — for example the pipeline polling keeps running even
@@ -51,39 +63,38 @@ export function App() {
   // Incremented by the ↻ button — Dashboard/Data reload their data on change.
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // ── Sliding nav indicator ────────────────────────────────────────────────
-  // One cyan bar that glides under the active tab instead of per-tab
-  // underlines: measured from the active button, re-measured on resize.
-  const navRef = useRef(null);
-  const [indicator, setIndicator] = useState({ left: 0, width: 0 });
-
-  useLayoutEffect(() => {
-    const measure = () => {
-      const nav = navRef.current;
-      const activeButton = nav?.querySelector('.tab.active');
-      if (nav && activeButton) {
-        // Rect-based (not offsetLeft): the buttons sit inside the group pill,
-        // so offsets must be relative to the whole nav.
-        const navRect = nav.getBoundingClientRect();
-        const btnRect = activeButton.getBoundingClientRect();
-        setIndicator({
-          left: btnRect.left - navRect.left + 10,
-          width: btnRect.width - 20,
-        });
-      }
-    };
-    measure();
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  }, [activeTab]);
-
   return (
     <>
-      <header>
-        <div className="header-left">
-          <div className="logo">VSR</div>
-          <span className="header-sep"></span>
-          <span className="header-subtitle">Romanian VSR · Dataset Builder</span>
+      <aside className="sidebar" aria-label="Main navigation">
+        <div className="sidebar-brand">
+          <span className="sidebar-mark" aria-hidden="true">VSR</span>
+          <span className="sidebar-name">
+            <strong>Dataset Builder</strong>
+            <span>Romanian · Moldovan accent</span>
+          </span>
+        </div>
+
+        <nav className="sidebar-nav">
+          {NAV_GROUPS.map((group) => (
+            <div className="sidebar-group" key={group.label}>
+              <div className="sidebar-group-label">{group.label}</div>
+              {group.items.map((tab) => (
+                <button
+                  key={tab.id}
+                  className={`sidebar-item ${activeTab === tab.id ? 'active' : ''}`}
+                  aria-current={activeTab === tab.id ? 'page' : undefined}
+                  title={tab.label}
+                  onClick={() => setStoredTab(tab.id)}
+                >
+                  <NavIcon name={tab.icon} />
+                  <span className="sidebar-item-label">{tab.label}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </nav>
+
+        <div className="sidebar-foot">
           {/* Persistent reminder that the numbers on screen are simulated. */}
           {IS_DEMO_MODE && (
             <span className="demo-badge" title="Demo mode — replaying a simulated log. Remove ?demo=1 from the URL to exit.">
@@ -93,27 +104,9 @@ export function App() {
           {/* Live backend indicator — pointless in demo mode (no backend). */}
           {!IS_DEMO_MODE && <BackendStatus />}
         </div>
-        <div className="header-right">
-          <nav className="tabs" ref={navRef}>
-            <div className="tab-group">
-              {TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  className={`tab ${activeTab === tab.id ? 'active' : ''}`}
-                  aria-current={activeTab === tab.id ? 'page' : undefined}
-                  onClick={() => setStoredTab(tab.id)}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-            <span
-              className="nav-indicator"
-              style={{ transform: `translateX(${indicator.left}px)`, width: indicator.width }}
-            />
-          </nav>
-        </div>
-      </header>
+      </aside>
+
+      <div className="app-main">
 
       {/* All tabs are mounted; only the active one is visible (CSS). Every
           tab gets its own error boundary so a render crash in one tab
@@ -145,8 +138,27 @@ export function App() {
         />
       </ErrorBoundary>
 
+      </div>
+
       {/* Toast notifications (bottom-right corner) */}
       <Toaster />
     </>
+  );
+}
+
+/** Small line icons for the sidebar (inline SVG, inherit currentColor). */
+function NavIcon({ name }) {
+  const paths = {
+    overview: <><path d="M4 19V11" /><path d="M10 19V5" /><path d="M16 19v-6" /><path d="M3 19h18" /></>,
+    table: <><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10" /></>,
+    grid: <><rect x="4" y="4" width="7" height="7" rx="1.5" /><rect x="13" y="4" width="7" height="7" rx="1.5" /><rect x="4" y="13" width="7" height="7" rx="1.5" /><rect x="13" y="13" width="7" height="7" rx="1.5" /></>,
+    check: <><path d="M20 12a8 8 0 1 1-4.7-7.3" /><path d="M9 11.5l3 3 8-8" /></>,
+    play: <><circle cx="12" cy="12" r="8.5" /><path d="M10 8.8v6.4l5.2-3.2z" /></>,
+  };
+  return (
+    <svg className="sidebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none"
+      stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {paths[name]}
+    </svg>
   );
 }

@@ -1,11 +1,12 @@
 import { useState, useMemo, useEffect } from 'react';
+import { useFitCount, fitTableRows } from '../../hooks/useFitCount.js';
 import { api } from '../../api.js';
 import { toast } from '../../components/toast.jsx';
 import { formatDurationShort } from '../../utils/format.js';
 import { Pagination } from '../../components/Pagination.jsx';
 import { detectSpeakerCapabilities } from '../../utils/datasetCapabilities.js';
 
-const SPEAKERS_PER_PAGE = 25;
+const SPEAKERS_PER_PAGE = 25; // until the table has been measured
 
 /** The numeric columns — for these, the default sort is descending. */
 const NUMERIC_KEYS = new Set(['num_videos', 'num_segments', 'total_duration_s', 'avg_asd', 'avg_wer', 'age_estimate', 'gender_confidence']);
@@ -183,9 +184,11 @@ export function SpeakersTable({ speakers, onSpeakersChanged }) {
     });
   }, [speakers, sort]);
 
-  const totalPages = Math.max(1, Math.ceil(sorted.length / SPEAKERS_PER_PAGE));
+  // Rows per page = rows that fit on screen (no empty band, no scroll).
+  const [tableWrapRef, perPage] = useFitCount(fitTableRows(44), SPEAKERS_PER_PAGE, [sorted.length > 0]);
+  const totalPages = Math.max(1, Math.ceil(sorted.length / perPage));
   const safePage = Math.min(page, totalPages);
-  const pageRows = sorted.slice((safePage - 1) * SPEAKERS_PER_PAGE, safePage * SPEAKERS_PER_PAGE);
+  const pageRows = sorted.slice((safePage - 1) * perPage, safePage * perPage);
 
   /** Header click: switches the column or flips the direction. */
   function handleHeaderClick(key) {
@@ -206,7 +209,7 @@ export function SpeakersTable({ speakers, onSpeakersChanged }) {
           {sorted.length ? `${sorted.length} speaker(s) · page ${safePage}/${totalPages}` : ''}
         </span>
       </div>
-      <div className="cmd-table-wrap">
+      <div className="cmd-table-wrap" ref={tableWrapRef}>
         <table className="speakers-table">
           <thead>
             <tr>

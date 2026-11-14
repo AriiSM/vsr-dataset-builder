@@ -3,11 +3,41 @@ import { api } from '../../api.js';
 import { formatDuration, formatDurationShort, QUALITY_THRESHOLDS } from '../../utils/format.js';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue.js';
 import { useLocalStorage } from '../../hooks/useLocalStorage.js';
+import { useFitCount } from '../../hooks/useFitCount.js';
 import { detectSegmentCapabilities, normalizeTier } from '../../utils/datasetCapabilities.js';
 import { SegmentCard } from './SegmentCard.jsx';
 import { SegmentModal } from './SegmentModal.jsx';
 
-const SEGMENTS_PER_PAGE = 45; // 15 columns × 3 rows
+const SEGMENTS_PER_PAGE = 45; // until the grid has been measured
+const CARD_MIN_W = 176;       // px — preferred narrowest card
+const CARD_SMALLEST_W = 140;  // px — never shrink cards below this to fill height
+const GRID_GAP = 10;     // px — must match .gallery-grid gap
+const GRID_PAD = 14;     // px — must match .gallery-grid padding
+
+/**
+ * Columns × rows of cards that fill the grid with the least empty space.
+ * Card height = square thumbnail + body (measured from a rendered card).
+ * Starting from the widest layout, it also tries a few more columns
+ * (smaller cards) and keeps the one that wastes the least height.
+ */
+function measureGrid(grid) {
+  const innerW = grid.clientWidth - 2 * GRID_PAD;
+  const innerH = grid.clientHeight - 2 * GRID_PAD;
+  const body = grid.querySelector('.seg-card-body');
+  const bodyH = body ? body.getBoundingClientRect().height + 2 : 76;
+  const baseCols = Math.max(1, Math.floor((innerW + GRID_GAP) / (CARD_MIN_W + GRID_GAP)));
+
+  let best = null;
+  for (let cols = baseCols; cols <= baseCols + 4; cols++) {
+    const cardW = (innerW - GRID_GAP * (cols - 1)) / cols;
+    if (cardW < CARD_SMALLEST_W && cols > baseCols) break;
+    const cardH = cardW + bodyH;
+    const rows = Math.max(1, Math.floor((innerH + GRID_GAP) / (cardH + GRID_GAP)));
+    const waste = innerH - (rows * cardH + (rows - 1) * GRID_GAP);
+    if (!best || waste < best.waste - 8) best = { cols, rows, waste };
+  }
+  return { cols: best.cols, rows: best.rows };
+}
 
 /** Filter chips above the gallery. */
 const FILTER_CHIPS = [
@@ -140,7 +170,6 @@ export function ExplorerTab({ isActive }) {
   const [openSegmentId, setOpenSegmentId] = useState(null);
   const search = useDebouncedValue(searchInput, 140);
 
-  const gridRef = useRef(null);
   // A single IntersectionObserver shared by all cards — sets the video
   // src only once the card becomes visible.
   const observerRef = useRef(null);
@@ -209,11 +238,14 @@ export function ExplorerTab({ isActive }) {
     return applySort(result, sortOption);
   }, [segments, filter, regionFilter, reviewMap, search, sortOption]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / SEGMENTS_PER_PAGE));
+  // Page size follows the window: exactly the cards that fit, no scroll.
+  const [gridRef, gridShape] = useFitCount(measureGrid, { cols: 15, rows: 3 }, [filtered.length > 0]);
+  const perPage = gridShape.cols * gridShape.rows || SEGMENTS_PER_PAGE;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
   const safePage = Math.min(page, totalPages);
   const pageSegments = filtered.slice(
-    (safePage - 1) * SEGMENTS_PER_PAGE,
-    safePage * SEGMENTS_PER_PAGE
+    (safePage - 1) * perPage,
+    safePage * perPage
   );
 
   // Statistics for the strip above the gallery (on the filtered set).
@@ -239,57 +271,45 @@ export function ExplorerTab({ isActive }) {
   return (
     <main className={`tab-content ${isActive ? 'active' : ''}`} id="tab-explorer">
       <div className="gallery-layout">
-        {/* Top bar: title + Face/Mouth toggle + Refresh */}
-        <div className="gallery-topbar">
-          <span className="cmd-panel-label">Segment gallery</span>
-          <span className="cmd-panel-count">
-            {segments.length > 0 &&
-              `${filtered.length.toLocaleString()} of ${segments.length.toLocaleString()} segments`}
-          </span>
-          <div className="gallery-topbar-actions">
-            <div className="crop-toggle" role="group" aria-label="Crop type">
+        {/* Page head: title, a one-line summary of the filtered set, actions */}
+        <div className="page-head">
+          <div className="page-head-text">
+            <h1>Explorer</h1>
+            <p className="page-head-summary">
+              {segments.length === 0 ? 'Every exported segment, with its quality scores.' : (
+                <>
+                  <strong>{overview.count.toLocaleString()}</strong>
+                  {filtered.length !== segments.length && ` of ${segments.length.toLocaleString()}`} segments
+                  <span className="sep" />
+                  <strong>{formatDurationShort(overview.totalSec)}</strong> of speech
+                  <span className="sep" />
+                  average <strong>{formatDuration(overview.avgSec)}</strong>
+                  <span className="sep" />
+                  <strong>{overview.videoCount}</strong> videos
+                  <span className="sep" />
+                  <strong>{overview.approvedCount.toLocaleString()}</strong> approved
+                </>
+              )}
+            </p>
+          </div>
+          <div className="page-head-actions">
+            <div className="data-switch" role="group" aria-label="Crop type">
               <button
-                className={`crop-btn ${crop === 'face' ? 'active' : ''}`}
+                className={`data-switch-btn ${crop === 'face' ? 'active' : ''}`}
                 onClick={() => setCrop('face')}
               >
                 Face
               </button>
               <button
-                className={`crop-btn ${crop === 'mouth' ? 'active' : ''}`}
+                className={`data-switch-btn ${crop === 'mouth' ? 'active' : ''}`}
                 onClick={() => setCrop('mouth')}
               >
                 Mouth
               </button>
             </div>
-            <button className="btn-micro" title="Reload" onClick={loadSegments}>Refresh</button>
+            <button className="btn-quiet" title="Reload segments" onClick={loadSegments}>Refresh</button>
           </div>
         </div>
-
-        {/* Statistics strip (persistent) */}
-        {segments.length > 0 && (
-          <div className="gallery-overview">
-            <div className="ov-card">
-              <span className="ov-value cyan">{overview.count.toLocaleString()}</span>
-              <span className="ov-label">Segments</span>
-            </div>
-            <div className="ov-card">
-              <span className="ov-value green">{formatDurationShort(overview.totalSec)}</span>
-              <span className="ov-label">Duration</span>
-            </div>
-            <div className="ov-card">
-              <span className="ov-value">{formatDuration(overview.avgSec)}</span>
-              <span className="ov-label">Avg clip</span>
-            </div>
-            <div className="ov-card">
-              <span className="ov-value">{overview.videoCount}</span>
-              <span className="ov-label">Videos</span>
-            </div>
-            <div className="ov-card">
-              <span className="ov-value green">{overview.approvedCount.toLocaleString()}</span>
-              <span className="ov-label">Approved</span>
-            </div>
-          </div>
-        )}
 
         {/* Filter bar: search + chips + sorting */}
         <div className="gallery-filters">
@@ -349,7 +369,11 @@ export function ExplorerTab({ isActive }) {
         </div>
 
         {/* Card grid */}
-        <div className="gallery-grid" ref={gridRef}>
+        <div
+          className="gallery-grid"
+          ref={gridRef}
+          style={{ gridTemplateColumns: `repeat(${gridShape.cols}, minmax(0, 1fr))` }}
+        >
           {loading ? (
             <div className="gallery-empty">Loading...</div>
           ) : loadError ? (
@@ -372,10 +396,12 @@ export function ExplorerTab({ isActive }) {
           )}
         </div>
 
-        {/* Simple pagination: forward/back only (the grid has 45 cards per page) */}
+        {/* Simple pagination: forward/back only (page size = cards that fit) */}
         {totalPages > 1 && (
           <div className="gallery-pagination">
-            <span className="page-info">Page {safePage} of {totalPages}</span>
+            <span className="page-info">
+              Page {safePage} of {totalPages} · {perPage} per page
+            </span>
             <div className="page-btns">
               <button className="page-btn" onClick={() => goToPage(safePage - 1)} disabled={safePage === 1}>‹</button>
               <button className="page-btn" onClick={() => goToPage(safePage + 1)} disabled={safePage === totalPages}>›</button>

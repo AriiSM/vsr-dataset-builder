@@ -1,10 +1,11 @@
 import { useState, useMemo } from 'react';
+import { useFitCount, fitTableRows } from '../../hooks/useFitCount.js';
 import { formatDurationShort } from '../../utils/format.js';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue.js';
 import { Pagination } from '../../components/Pagination.jsx';
 import { VideoDocumentModal } from './VideoDocumentModal.jsx';
 
-const VIDEOS_PER_PAGE = 25;
+const VIDEOS_PER_PAGE = 25; // until the table has been measured
 
 /** The status filters available above the table. */
 const STATUS_FILTERS = [
@@ -85,9 +86,11 @@ export function VideosTable({ videos, headerActions = null }) {
   }, [videos]);
   const columnCount = FIXED_COLUMN_COUNT + shown.size;
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / VIDEOS_PER_PAGE));
+  // Rows per page = rows that fit on screen (no empty band, no scroll).
+  const [tableWrapRef, perPage] = useFitCount(fitTableRows(34), VIDEOS_PER_PAGE, [filtered.length > 0]);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
   const safePage = Math.min(page, totalPages);
-  const pageRows = filtered.slice((safePage - 1) * VIDEOS_PER_PAGE, safePage * VIDEOS_PER_PAGE);
+  const pageRows = filtered.slice((safePage - 1) * perPage, safePage * perPage);
 
   return (
     <div className="browse-section browse-section-videos">
@@ -120,7 +123,7 @@ export function VideosTable({ videos, headerActions = null }) {
         </div>
       </div>
 
-      <div className="cmd-table-wrap browse-table-scroll">
+      <div className="cmd-table-wrap browse-table-scroll" ref={tableWrapRef}>
         <table className="videos-table">
           <thead>
             <tr>
