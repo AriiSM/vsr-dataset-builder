@@ -1,0 +1,823 @@
+"""
+VSR Pipeline — the top-level orchestrator.
+
+Thin by design: composes the collaborators and owns only the PER-VIDEO
+story — download → sentence segmentation → the per-clip cascade (delegated
+to ClipProcessor) → speaker identity clustering → catalog updates → cleanup.
+
+Collaborators (one file each, one responsibility each):
+    PipelineConfig    (pipeline_config.py)    — every knob, from config.yaml
+    ServiceContainer  (service_container.py)  — lazy access to all services
+    CheckpointStore   (checkpoint_store.py)   — resume state + recovery
+    CatalogWriter     (catalog_writer.py)     — videos_master + segments_index
+    ClipProcessor     (clip_processor.py)     — the per-clip cascade
+"""
+
+import math
+import time
+import traceback
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import List, Optional
+
+from loguru import logger
+
+from orchestrator.catalog_writer import CatalogWriter
+from orchestrator.checkpoint_store import CheckpointStore
+from orchestrator.clip_processor import ClipProcessor
+from orchestrator.pipeline_config import PipelineConfig
+from orchestrator.processing_results import (
+    ClipResult,
+    PipelineCancelled,
+    ProcessingResult,
+)
+from orchestrator.service_container import ServiceContainer
+from services.mouth_exporter.segment_record import ExportedSegment
+from services.quality_indexer.av_consensus import compute_av_consensus
+from services.quality_indexer.identity_records import SegmentIdentityRecord
+from services.segmenter.clip_manifest import VideoClip
+from services.segmenter.sentence_segmenter import (
+    SegmentationSettings,
+    SentenceSegmenter,
+)
+from vsr_shared.excel_schema import ProcessingStatus
+from vsr_shared.speakers_registry import (
+    ensure_speaker_exists,
+    recompute_aggregates,
+    upsert_speaker,
+)
+
+__all__ = ["VSRPipeline", "PipelineConfig"]
+
+
+class VSRPipeline:
+    """One video at a time: download → segment → per-clip cascade → identity."""
+
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+
+        # performance.torch_cpu_threads: cap torch's CPU pool so the
+        # analysis thread leaves cores free for the export lane + system
+        # (uncapped torch grabs every core and starves the encoder).
+        if config.torch_cpu_threads > 0:
+            import torch as _torch
+            _torch.set_num_threads(config.torch_cpu_threads)
+            logger.info(f"torch CPU threads capped at {config.torch_cpu_threads}")
+
+        # performance.encoder_threads: cap each ffmpeg/x264 encode in the
+        # export lane (process-wide setting in the encoder module).
+        if config.encoder_threads > 0:
+            from services.mouth_exporter import video_encoder as _venc
+            _venc.ENCODER_THREADS = config.encoder_threads
+            logger.info(f"x264 encoder threads capped at {config.encoder_threads}")
+
+        for directory in [
+            config.raw_dir, config.clips_dir,
+            config.processed_dir, config.metadata_dir, config.temp_dir,
+        ]:
+            directory.mkdir(parents=True, exist_ok=True)
+
+        self.services = ServiceContainer(config)
+        self.checkpoints = CheckpointStore(config)
+        self.catalog = CatalogWriter(config, self.checkpoints)
+        self.clip_processor = ClipProcessor(config, self.services, self.checkpoints)
+
+        # Job-queue hooks (both optional — CLI runs leave them unset):
+        #   on_progress(dict)      called at stage changes + after every clip
+        #   should_cancel() -> bool  checked between stages and between clips;
+        #     True → PipelineCancelled (video stays resumable via checkpoint)
+        self.on_progress = None
+        self.should_cancel = None
+
+    @classmethod
+    def from_config(cls, config_path) -> "VSRPipeline":
+        return cls(PipelineConfig.from_yaml(Path(config_path)))
+
+    def _record_clip_outcome(
+        self,
+        video_id: str,
+        clip: VideoClip,
+        clip_result: ClipResult,
+        checkpoint: dict,
+        total_clips: int,
+        exported_segments: List[ExportedSegment],
+    ) -> None:
+        """Main-thread bookkeeping for ONE finished clip: checkpoint row,
+        progress heartbeat, dropped/exported catalog writes.
+
+        The checkpoint file and SQLite are touched only here — never from
+        the export lane thread (the DB connection is main-thread-bound)."""
+        seg = clip_result.exported_segment
+        checkpoint.setdefault("processed_clips", {})[clip.clip_id] = {
+            "result": "dropped" if clip_result.dropped else "exported",
+            "reason": clip_result.drop_reason,
+            "segment_id": seg.segment_id if seg else None,
+            "start_time": seg.start_time if seg else None,
+            "end_time": seg.end_time if seg else None,
+            "duration": seg.duration if seg else None,
+            "asd_score": seg.asd_score if seg else None,
+            "syncnet_confidence": seg.syncnet_confidence if seg else None,
+            "whisper_confidence": seg.whisper_confidence if seg else None,
+            # Quality metadata (Phase 0) — read back with .get() so
+            # checkpoints written before this change still resume fine.
+            "face_visibility_ratio": seg.face_visibility_ratio if seg else None,
+            "whisper_conf_min": seg.whisper_conf_min if seg else None,
+            "whisper_conf_p25": seg.whisper_conf_p25 if seg else None,
+            "asd_method": seg.asd_method if seg else None,
+            "syncnet_method": seg.syncnet_method if seg else None,
+            "face_bbox": seg.face_bbox if seg else None,
+            "mouth_landmark_fail_rate": seg.mouth_landmark_fail_rate if seg else None,
+            "mouth_roi_method": seg.mouth_roi_method if seg else None,
+            "head_pose_avg": seg.head_pose_avg if seg else None,
+            "quality_tier": seg.quality_tier if seg else None,
+            "audio_speaker_label": seg.audio_speaker_label if seg else None,
+            "identity": clip_result.identity,
+        }
+        new_count = len(exported_segments) + (1 if seg else 0)
+        checkpoint["segment_count"] = max(checkpoint.get("segment_count", 0), new_count)
+        checkpoint["video_id"] = video_id
+        self.checkpoints.write(video_id, checkpoint)
+
+        clip_num = len(checkpoint.get("processed_clips", {}))
+        self._report_progress(
+            video_id=video_id, stage="clips",
+            clip_num=clip_num, total_clips=total_clips,
+            segments_exported=len(exported_segments),
+        )
+
+        if clip_result.dropped:
+            logger.info(
+                f"  CLIP {clip_num}/{total_clips} dropped"
+                f" ({clip_result.drop_reason}): {clip.clip_id}"
+            )
+            # Persist the rejection WITH its reason — survives cleanup
+            self.catalog.record_dropped_clip(
+                video_id, clip, clip_result.drop_reason or "",
+                face_visibility=clip_result.face_visibility_ratio,
+                whisper_conf=clip_result.whisper_conf,
+                asd_score=clip_result.asd_score,
+            )
+            return
+
+        if seg:
+            exported_segments.append(seg)
+            logger.info(
+                f"  CLIP {clip_num}/{total_clips} exported: {seg.segment_id}"
+            )
+            # Transaction per clip into dataset.db so the Review tab sees
+            # the segment immediately
+            self.catalog.append_segment(seg)
+            if clip_result.identity and clip_result.identity.get("embedding"):
+                self.catalog.store_segment_embedding(
+                    seg.segment_id, clip_result.identity["embedding"],
+                )
+
+    def _report_progress(self, **payload) -> None:
+        if self.on_progress is not None:
+            try:
+                self.on_progress(payload)
+            except Exception as e:
+                logger.debug(f"progress callback failed: {e}")
+
+    def _check_cancel(self, video_id: str) -> None:
+        if self.should_cancel is not None and self.should_cancel():
+            logger.info(f"Cancel requested — stopping cleanly at {video_id}")
+            raise PipelineCancelled(video_id)
+
+    # lazy properties
+    # main entry point
+    def process_video(
+        self,
+        video_id: str,
+        youtube_url: str,
+        skip_download: bool = False,
+        skip_if_exists: bool = True,
+        verify_cc: bool = True,
+    ) -> ProcessingResult:
+        """Process one video end-to-end."""
+        start_time = time.time()
+
+        try:
+            # Mark as in-progress so interrupted runs are identifiable
+            self.catalog.set_video_status(video_id, ProcessingStatus.PROCESSING)
+
+            # 1. Download
+            self._check_cancel(video_id)
+            self._report_progress(video_id=video_id, stage="download")
+            video_path = self.config.raw_dir / f"{video_id}.mp4"
+            if not video_path.exists() or not skip_download:
+                logger.info(f"Step 1: Downloading video: {video_id}")
+                video_path = self.services.downloader.download(
+                    youtube_url, video_id, verify_cc=verify_cc
+                )
+                if video_path is None:
+                    failed = ProcessingResult(
+                        video_id=video_id,
+                        status=ProcessingStatus.FAILED,
+                        error_message="Download failed",
+                        processing_time=time.time() - start_time,
+                    )
+                    self.catalog.update_for_result(failed)
+                    return failed
+            else:
+                logger.info(f"Step 1: Video already exists: {video_path}")
+
+            # 2. VAD split
+            self._check_cancel(video_id)
+            self._report_progress(video_id=video_id, stage="segmentation")
+            # Re-use existing clips if they are still on disk
+            clip_dir = self.config.clips_dir / video_id
+            existing_clip_files = sorted(clip_dir.glob("*.mp4")) if clip_dir.exists() else []
+
+            if existing_clip_files:
+                logger.info(
+                    f"Step 2: {len(existing_clip_files)} existing clips found in {clip_dir}, "
+                    "skipping segmentation"
+                )
+                # Manifest v2 restores word timestamps too (sentence strategy);
+                # v1 clips fall back to per-clip transcription downstream.
+                clips = self.services.splitter.load_existing_clips(video_id, clip_dir)
+            elif self.config.segmentation_strategy == "sentence":
+                clips = self._segment_video_into_sentences(video_path, video_id)
+            else:
+                logger.info("Step 2: Splitting video by VAD (legacy strategy)...")
+                clips = self.services.splitter.split_video(
+                    video_path,
+                    video_id,
+                    clips_dir=self.config.clips_dir,
+                    temp_dir=self.config.temp_dir,
+                )
+
+            if not clips:
+                failed = ProcessingResult(
+                    video_id=video_id,
+                    status=ProcessingStatus.FAILED,
+                    error_message="No speech clips after VAD splitting",
+                    processing_time=time.time() - start_time,
+                )
+                self.catalog.update_for_result(failed)
+                return failed
+
+            logger.info(f"  {len(clips)} clips to process")
+
+            # 3. Per-clip processing
+            logger.info("Step 3: Processing clips...")
+
+            # Read checkpoint — tells us which clips were already processed
+            checkpoint = self.checkpoints.read(video_id)
+            processed_clip_ids: set = set(checkpoint.get("processed_clips", {}).keys())
+            segment_index: int = checkpoint.get("segment_count", 0)
+
+            # Recover exported segments that are already on disk
+            exported_segments: List[ExportedSegment] = \
+                self.checkpoints.recover_segments(video_id, checkpoint)
+
+            if checkpoint:
+                logger.info(
+                    f"  Resuming: {len(exported_segments)} segments already done, "
+                    f"{len(processed_clip_ids)} clips already processed"
+                )
+            else:
+                logger.info(f"  Starting fresh ({len(clips)} clips)")
+
+            # GPU→CPU conveyor (export.gpu_cpu_overlap): this thread owns all
+            # GPU models AND all bookkeeping (checkpoint/DB/progress — SQLite
+            # stays single-threaded); one export-lane thread runs the
+            # CPU-only phase (mouth crop, encode, tier, ArcFace-on-CPU) of
+            # clip N while the GPU analyzes N+1. max_workers=1 keeps segment
+            # indices ordered; the 2-in-flight cap bounds RAM.
+            total_clips = len(clips)
+            use_overlap = self.config.gpu_cpu_overlap
+            # max() guard: if files were missing during recovery,
+            # len(exported_segments) < segment_count; use the higher value
+            # so new clips never receive an index that was already committed.
+            next_index = max(segment_index, len(exported_segments))
+            export_pool = (
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="export-lane")
+                if use_overlap else None
+            )
+            pending: deque = deque()  # (clip, Future) in submission order
+
+            def drain_one(block: bool) -> bool:
+                """Record the oldest in-flight export; False if still running."""
+                pending_clip, future = pending[0]
+                if not block and not future.done():
+                    return False
+                pending.popleft()
+                try:
+                    result = future.result()
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    logger.error(f"Clip {pending_clip.clip_id} failed: {e}")
+                    result = ClipResult(
+                        pending_clip, dropped=True,
+                        drop_reason=f"processing_error: {type(e).__name__}: {str(e)[:150]}",
+                    )
+                self._record_clip_outcome(
+                    video_id, pending_clip, result, checkpoint,
+                    total_clips, exported_segments,
+                )
+                return True
+
+            try:
+                for clip in clips:
+                    # Skip clips already processed in a previous (interrupted) run
+                    if clip.clip_id in processed_clip_ids:
+                        logger.debug(f"  Skipping already-processed clip: {clip.clip_id}")
+                        continue
+
+                    self._check_cancel(video_id)
+                    # Record any export that finished while the GPU worked.
+                    while pending and drain_one(block=False):
+                        pass
+                    # Backpressure: at most 2 exports in flight.
+                    while len(pending) >= 2:
+                        drain_one(block=True)
+
+                    try:
+                        if use_overlap:
+                            outcome = self.clip_processor.analyze(clip, video_id)
+                        else:
+                            outcome = self.clip_processor.process(
+                                clip, video_id, next_index)
+                    except RuntimeError:
+                        # Environment/config problems (missing models, tokens) —
+                        # every clip would fail identically; abort loudly instead.
+                        raise
+                    except Exception as e:
+                        logger.error(f"Clip {clip.clip_id} failed: {e}")
+                        outcome = ClipResult(
+                            clip, dropped=True,
+                            drop_reason=f"processing_error: {type(e).__name__}: {str(e)[:150]}",
+                        )
+
+                    if isinstance(outcome, ClipResult):
+                        self._record_clip_outcome(
+                            video_id, clip, outcome, checkpoint,
+                            total_clips, exported_segments,
+                        )
+                        if outcome.exported_segment:
+                            next_index += 1
+                        continue
+
+                    # Passed every gate — hand to the export lane. The index
+                    # is assigned at submission; a failed export leaves a gap
+                    # in the numbering, harmless because segment names are
+                    # clip-scoped (clip_id + index).
+                    future = export_pool.submit(
+                        self.clip_processor.export_analyzed,
+                        outcome, video_id, next_index,
+                    )
+                    next_index += 1
+                    pending.append((clip, future))
+
+                    # performance.gpu_pause_ms: optional thermal breather
+                    # between clips (laptop cooling can't shed sustained load).
+                    if self.config.gpu_pause_ms > 0:
+                        time.sleep(self.config.gpu_pause_ms / 1000.0)
+
+                while pending:
+                    drain_one(block=True)
+            except PipelineCancelled:
+                # Let in-flight exports finish and checkpoint them (a few
+                # seconds) — nothing is lost, the video resumes exactly here.
+                while pending:
+                    try:
+                        drain_one(block=True)
+                    except Exception as e:
+                        logger.warning(
+                            f"Drain error on cancel for {video_id}: {e} "
+                            f"— clip will be re-processed on resume"
+                        )
+                raise
+            finally:
+                if export_pool is not None:
+                    export_pool.shutdown(wait=True)
+            # 4. Cleanup
+            if self.config.cleanup_clips:
+                import shutil
+                if clip_dir.exists():
+                    shutil.rmtree(clip_dir)
+                    logger.debug(f"Cleaned up clips dir: {clip_dir}")
+            else:
+                # Remove checkpoint — processing completed successfully
+                cp = self.checkpoints.path_for(video_id)
+                if cp.exists():
+                    cp.unlink()
+                    logger.debug("Checkpoint removed (processing complete)")
+
+            total_duration = sum(s.duration for s in exported_segments)
+            logger.info(
+                f"Exported {len(exported_segments)} segments "
+                f"({total_duration:.1f}s total)"
+            )
+
+            # First-pass speaker identity: cluster ArcFace evidence from all
+            # exported segments so a recurring speaker gets ONE id, then write
+            # per-cluster demographics (gender + numeric age) to the registry.
+            # MUST run before _update_excel — that's what rewrites
+            # the segments table with the final speaker_id values.
+            if self.config.speaker_identity_enabled:
+                try:
+                    self._assign_speaker_identities(
+                        video_id, exported_segments, checkpoint
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Speaker identity assignment failed for {video_id}: {e}"
+                    )
+
+            final_result = ProcessingResult(
+                video_id=video_id,
+                status=ProcessingStatus.COMPLETED,
+                segments=exported_segments,
+                total_duration=total_duration,
+                processing_time=time.time() - start_time,
+            )
+            self.catalog.update_for_result(final_result)
+
+            # Registry upkeep — demographics were already written per cluster
+            # by _assign_speaker_identities.
+            try:
+                seen_speakers = {
+                    seg.speaker_id or f"{seg.video_id}_spk_unknown"
+                    for seg in exported_segments
+                }
+                for sid in seen_speakers:
+                    ensure_speaker_exists(self.config.metadata_dir, sid)
+                if seen_speakers:
+                    recompute_aggregates(self.config.metadata_dir)
+            except Exception as e:
+                logger.warning(f"Speakers registry update failed for {video_id}: {e}")
+
+            return final_result
+
+        except PipelineCancelled:
+            # Deliberate stop: the video keeps status 'processing' + its
+            # checkpoint — resume-batch picks it up later. Propagate so the
+            # worker marks the JOB cancelled (not the video failed).
+            raise
+        except Exception as e:
+            logger.error(f"Pipeline failed for {video_id}: {e}")
+            logger.debug(traceback.format_exc())
+            failed = ProcessingResult(
+                video_id=video_id,
+                status=ProcessingStatus.FAILED,
+                error_message=str(e),
+                processing_time=time.time() - start_time,
+            )
+            self.catalog.update_for_result(failed)
+            return failed
+
+    def _assign_speaker_identities(
+        self,
+        video_id: str,
+        exported_segments: List[ExportedSegment],
+        checkpoint: dict,
+    ) -> None:
+        """Cluster per-segment ArcFace evidence into speaker identities and
+        write per-cluster demographics to the speakers registry.
+
+        Evidence comes from the checkpoint, so segments exported by an earlier
+        interrupted run participate too (their face crops were sampled when
+        they were first exported).
+        """
+        records: Dict[str, SegmentIdentityRecord] = {}
+        for info in checkpoint.get("processed_clips", {}).values():
+            if info.get("result") != "exported":
+                continue
+            segment_id = info.get("segment_id")
+            record = SegmentIdentityRecord.from_json_dict(info.get("identity") or {})
+            if segment_id and record is not None:
+                records[segment_id] = record
+
+        if not records:
+            logger.warning(
+                f"No identity evidence for {video_id} — speaker ids stay default"
+            )
+            return
+
+        mapping, profiles = self.services.speaker_identifier.assign_speakers(video_id, records)
+
+        for segment in exported_segments:
+            if segment.segment_id in mapping:
+                segment.speaker_id = mapping[segment.segment_id]
+
+        accent_region = self._video_region(video_id)
+        for speaker_id, profile in profiles.items():
+            fields = {
+                "gender": profile.gender,
+                "gender_confidence": profile.gender_confidence,
+                "age_group": profile.age_group,
+                "age_std": profile.age_std,
+                "identity_match": profile.identity_match,
+            }
+            if not math.isnan(profile.age_estimate):
+                fields["age_estimate"] = profile.age_estimate
+            if accent_region:
+                fields["accent_region"] = accent_region
+            upsert_speaker(self.config.metadata_dir, speaker_id, fields)
+
+        self._flag_av_mismatches(video_id, exported_segments)
+
+    def _flag_av_mismatches(
+        self, video_id: str, exported_segments: List[ExportedSegment]
+    ) -> None:
+        """Voice↔face consensus: flag segments whose diarization voice points
+        at a different face than the voice's per-video majority.
+
+        Nothing is deleted — the flag caps the quality tier at B and surfaces
+        the segment for review (voice-over / B-roll / wrong-track cases).
+        """
+        consensus = compute_av_consensus([
+            (seg.segment_id, seg.audio_speaker_label, seg.speaker_id)
+            for seg in exported_segments
+        ])
+        if not consensus.num_judged:
+            return
+
+        for segment in exported_segments:
+            verdict = consensus.mismatch_by_segment.get(segment.segment_id)
+            if verdict is None:
+                continue
+            segment.av_speaker_mismatch = verdict
+            if verdict and segment.quality_tier == "A":
+                segment.quality_tier = "B"
+
+        if consensus.num_mismatched:
+            logger.warning(
+                f"AV consensus [{video_id}]: {consensus.num_mismatched}/"
+                f"{consensus.num_judged} segments contradict their voice's "
+                f"majority face — flagged av_speaker_mismatch, tier capped at B"
+            )
+        else:
+            logger.info(
+                f"AV consensus [{video_id}]: {consensus.num_judged} segments "
+                f"consistent (voices → faces: {consensus.voice_to_face})"
+            )
+
+    def _video_region(self, video_id: str) -> str:
+        """The video's region from the videos table (accent default)."""
+        try:
+            return self.catalog.db.videos.region(video_id)
+        except Exception as e:
+            logger.debug(f"Could not read region for {video_id}: {e}")
+            return ""
+
+    def _segment_video_into_sentences(
+        self, video_path: Path, video_id: str
+    ) -> List[VideoClip]:
+        """Sentence-strategy Step 2: transcribe-then-cut.
+
+        1. Extract full audio once.
+        2. Silero VAD → raw speech regions (pauses + hallucination filter).
+        3. WhisperX full-video pass → every word with timestamps + punctuation.
+        4. Sentence segmenter → cutting windows (never mid-word; over-long
+           sentences split at their largest pause, not at a blind limit).
+        5. ffmpeg cuts the clips; each clip carries its words (manifest v2).
+        6. Whisper is unloaded so RetinaFace/TalkNet get the GPU.
+        """
+        logger.info("Step 2: Sentence segmentation (VAD + full-video Whisper)...")
+
+        audio_path = self.services.splitter.extract_full_audio(
+            video_path, video_id, self.config.temp_dir
+        )
+        try:
+            speech_regions = self.services.splitter.detect_speech_regions(audio_path)
+            words = self.services.transcriber.transcribe_full(audio_path)
+
+            # Free Whisper + alignment VRAM BEFORE diarization loads: on a
+            # 4 GB card the three stacks together spill into shared memory
+            # (PCIe, ~10x slower) — they never need to coexist.
+            if self.config.whisper_unload_after_segmentation:
+                self.services.transcriber.unload()
+
+            if self.config.diarization_enabled and words:
+                # WHO speaks WHEN — labels enable speaker-turn boundaries.
+                # A diarization failure degrades to punctuation+pauses only,
+                # loudly, instead of killing the whole video.
+                try:
+                    self.services.diarizer.assign_speaker_labels(words, audio_path)
+                except Exception as e:
+                    logger.warning(
+                        f"Diarization failed for {video_id} — falling back to "
+                        f"punctuation+pause boundaries only: {e}"
+                    )
+        finally:
+            audio_path.unlink(missing_ok=True)
+
+        settings = SegmentationSettings(
+            sentence_end_chars=self.config.sentence_end_chars,
+            split_silence_threshold=self.config.split_threshold,
+            target_min_duration=self.config.target_min_duration,
+            target_max_duration=self.config.target_max_duration,
+            hard_min_duration=self.config.min_clip_duration,
+            hard_max_duration=self.config.segmentation_max_clip_duration,
+            merge_gap_max=self.config.merge_gap_max,
+            boundary_pad=self.config.boundary_pad,
+            vad_margin=self.config.vad_margin,
+        )
+        windows = SentenceSegmenter(settings).build_windows(words, speech_regions)
+        logger.info(
+            f"  {len(words)} words / {len(speech_regions)} speech regions "
+            f"→ {len(windows)} sentence windows"
+        )
+
+        clips = self.services.splitter.cut_sentence_windows(
+            video_path, video_id, windows, self.config.clips_dir
+        )
+
+        if self.config.whisper_unload_after_segmentation:
+            self.services.release_segmentation_models()
+
+        return clips
+
+    # resume
+    def resume_video(self, video_id: str, youtube_url: str) -> "ProcessingResult":
+        """
+        Resume a partially-processed video.
+
+        Reads the per-clip checkpoint (if present) to skip clips that were
+        already processed in the interrupted run, then continues from where
+        the pipeline stopped.  If no checkpoint exists, falls back to a full
+        re-run that skips the LRS2 export for segments already on disk.
+        """
+        logger.info(f"Resuming video: {video_id}")
+        checkpoint = self.checkpoints.read(video_id)
+
+        if checkpoint:
+            done = len(checkpoint.get("processed_clips", {}))
+            segs = checkpoint.get("segment_count", 0)
+            logger.info(f"  Checkpoint found: {done} clips done, {segs} segments exported")
+        else:
+            # No checkpoint — scan disk to report what's already there
+            proc_dir = self.config.processed_dir / video_id
+            existing = sorted(proc_dir.glob("*.mp4")) if proc_dir.exists() else []
+            logger.info(
+                f"  No checkpoint found. {len(existing)} segment file(s) already on disk "
+                "— will skip re-exporting those."
+            )
+
+        # process_video now handles checkpoint reading and the idempotency
+        # check automatically; skip_download avoids re-downloading the raw video.
+        return self.process_video(
+            video_id=video_id,
+            youtube_url=youtube_url,
+            skip_download=True,
+            verify_cc=False,
+        )
+
+    def process_batch_resume(
+        self,
+        excel_path: Path,
+        limit: Optional[int] = None,
+        video_ids: Optional[List[str]] = None,
+    ) -> "List[ProcessingResult]":
+        """
+        Resume all videos that were interrupted (status = 'processing' or
+        'failed') AND still have clip files or partial exports on disk.
+
+        If video_ids is given, only those rows are considered (status filter
+        is bypassed) — the on-disk clip/partial check still applies.
+
+        `excel_path` is accepted for call-site compatibility and IGNORED —
+        selection reads the videos table of dataset.db (storage v2).
+        """
+        eligible = self.catalog.db.videos.select_for_batch(
+            status_filter=["processing", "failed"], video_ids=video_ids)
+
+        resumable_rows = []
+        for row in eligible:
+            vid = str(row["video_id"])
+            has_clips = (self.config.clips_dir / vid).exists() and any(
+                (self.config.clips_dir / vid).glob("*.mp4")
+            )
+            has_partial = (self.config.processed_dir / vid / "face_crop").exists() and any(
+                (self.config.processed_dir / vid / "face_crop").glob("*.mp4")
+            )
+            if has_clips or has_partial:
+                resumable_rows.append(row)
+
+        if limit:
+            resumable_rows = resumable_rows[:limit]
+
+        logger.info(f"Found {len(resumable_rows)} resumable video(s)")
+        results = []
+        for i, row in enumerate(resumable_rows, 1):
+            vid = str(row["video_id"])
+            url = str(row.get("youtube_url") or "")
+            logger.info(f"Resuming {i}/{len(resumable_rows)}: {vid}")
+            results.append(self.resume_video(vid, url))
+
+        return results
+
+    # batch processing
+    def _prefetch_download(
+        self, video_id: str, url: str, verify_cc: bool
+    ) -> Optional[Path]:
+        """Best-effort background download for the next video in the batch.
+
+        Called from a dedicated prefetch thread while the GPU processes the
+        current video, so the next video's raw file is ready on disk before
+        process_video() reaches Step 1. Failures are logged and swallowed —
+        process_video() will retry the download through its normal path.
+        """
+        raw_path = self.config.raw_dir / f"{video_id}.mp4"
+        if raw_path.exists():
+            return raw_path
+        if not url:
+            return None
+        try:
+            return self.services.downloader.download(url, video_id, verify_cc=verify_cc)
+        except Exception as e:
+            logger.warning(f"Prefetch download failed for {video_id}: {e}")
+            return None
+
+    def process_batch(
+        self,
+        excel_path: Path,
+        status_filter: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        video_ids: Optional[List[str]] = None,
+    ) -> List[ProcessingResult]:
+        """Process a selection of videos from the catalog (videos table).
+
+        If video_ids is given, only those rows are processed (status_filter
+        is ignored). `excel_path` is accepted for call-site compatibility
+        and IGNORED — the DB is the source of truth (storage v2).
+
+        Download prefetching: while the GPU processes video N, a background
+        thread downloads video N+1 so process_video() skips the download
+        wait entirely. The prefetch is best-effort — any failure falls back
+        to the normal download path inside process_video().
+        """
+        rows = self.catalog.db.videos.select_for_batch(
+            status_filter=status_filter, video_ids=video_ids, limit=limit)
+
+        results: List[ProcessingResult] = []
+        total = len(rows)
+
+        prefetch_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="prefetch-dl"
+        )
+        prefetch_future = None
+        prefetch_video_id: Optional[str] = None
+
+        try:
+            for i, row in enumerate(rows, start=1):
+                video_id = str(row["video_id"])
+                url = str(row.get("youtube_url") or "")
+                license_val = str(row.get("license") or "unverified").strip()
+                verify_cc = license_val in ("", "unverified")
+
+                # Wait for this video's prefetch if one was submitted
+                if prefetch_video_id == video_id and prefetch_future is not None:
+                    try:
+                        prefetch_future.result()
+                        logger.debug(f"Prefetch complete for {video_id}")
+                    except Exception as e:
+                        logger.warning(
+                            f"Prefetch for {video_id} failed ({e})"
+                            f" — will download normally"
+                        )
+                    prefetch_future = None
+                    prefetch_video_id = None
+
+                # Submit prefetch for the NEXT video before starting this one —
+                # runs concurrently with the GPU processing of the current video.
+                if i < total:
+                    next_row = rows[i]  # rows is 0-indexed; rows[i] = video i+1
+                    next_id = str(next_row["video_id"])
+                    next_url = str(next_row.get("youtube_url") or "")
+                    next_license = str(next_row.get("license") or "unverified").strip()
+                    next_verify_cc = next_license in ("", "unverified")
+                    if next_url and not (self.config.raw_dir / f"{next_id}.mp4").exists():
+                        prefetch_future = prefetch_pool.submit(
+                            self._prefetch_download, next_id, next_url, next_verify_cc,
+                        )
+                        prefetch_video_id = next_id
+                        logger.debug(f"Prefetch started for {next_id}")
+
+                logger.info(f"Processing video {i}/{total}: {video_id}")
+                self._check_cancel(video_id)
+                self._report_progress(
+                    video_id=video_id, stage="batch", video_num=i, total_videos=total,
+                )
+
+                result = self.process_video(video_id, url, verify_cc=verify_cc)
+                results.append(result)
+
+        finally:
+            # Cancel any pending (not yet started) prefetch; running downloads
+            # complete in the background — the file will be ready for next run.
+            if prefetch_future is not None:
+                prefetch_future.cancel()
+            prefetch_pool.shutdown(wait=False)
+
+        return results
+
+    def sync_excel_from_disk(self, *args, **kwargs):
+        """CLI-facing delegate — the implementation lives in CatalogWriter."""
+        return self.catalog.sync_from_disk(*args, **kwargs)

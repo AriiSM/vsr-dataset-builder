@@ -1,0 +1,76 @@
+# vsr-worker — mușchiul: consumatorul cozii, rulează pipeline-ul pe GPU.
+# Aceeași imagine servește și review_assistant (comandă diferită în compose).
+#
+# Build (din rădăcina repo-ului; cere TalkNet-ASD/ clonat acolo):
+#   docker build -f docker/worker.Dockerfile -t vsr-worker --build-arg GIT_SHA=$(git rev-parse --short HEAD) .
+#
+# Baza CUDA: torch cu128 își aduce bibliotecile CUDA în wheel, dar cudnn-runtime
+# acoperă onnxruntime-gpu + orice fallback; versiunea EXACTĂ se confirmă la
+# pilot pe mașina reală (nvidia-smi → driver → matricea de compatibilitate).
+
+ARG CUDA_IMAGE=nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+FROM ${CUDA_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-venv python3-pip ffmpeg git nodejs \
+        libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.10 /usr/local/bin/python
+
+# 1. torch cu CUDA (layerul cel mai greu — primul, se schimbă cel mai rar)
+# PINNED ca trio (torch/vision/audio merg în perechi fixe): torchaudio>=2.9
+# a scos AudioMetaData (folosit de diarizare), iar un torchvision nepinuit
+# tras de retinaface-pytorch ar suprascrie torch-ul cu ultima versiune.
+RUN python -m pip install --no-cache-dir \
+        torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+# 2. restul stack-ului ML (torch>= din listă e deja satisfăcut)
+COPY requirements.txt /tmp/requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt && \
+    python -m pip install --no-cache-dir onnxruntime-gpu
+
+# 2a. driverul MongoDB pentru catalog — layer separat, ca adăugarea lui să
+# nu invalideze layerul greu de mai sus.
+COPY backend/shared/requirements.txt /tmp/shared-requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/shared-requirements.txt
+
+# 2b. cuDNN 8 ALĂTURI de cuDNN 9: baza CUDA 12.8 aduce cuDNN 9, dar motorul
+# Whisper (ctranslate2/faster-whisper) dlopen-ează libcudnn_ops_infer.so.8 —
+# fără ea procesul e ABORTAT instant la prima transcriere, fără traceback
+# Python (workerul doar „renaște"). Instalat cu --target ca să NU suprascrie
+# pachetul nvidia-cudnn-cu12 v9 de care depinde torch; loader-ul alege după
+# soname, deci cele două versiuni coexistă.
+RUN python -m pip install --no-cache-dir --target /opt/cudnn8 \
+        nvidia-cudnn-cu12==8.9.7.29
+ENV LD_LIBRARY_PATH=/opt/cudnn8/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+
+# 3. TalkNet vendorizat (clonat în rădăcina repo-ului înainte de build).
+# Repo-ul oficial NU are setup.py — nu se instalează cu pip; codul îl
+# importă direct (`from talkNet import ...`), deci ajunge pe PYTHONPATH.
+WORKDIR /app
+COPY TalkNet-ASD/ TalkNet-ASD/
+ENV PYTHONPATH=/app/TalkNet-ASD
+
+# 4. codul (ultimul layer — se schimbă cel mai des)
+COPY backend/  backend/
+COPY config/   config/
+
+# Volumele compose montează peste: /app/data /app/models /app/config
+RUN mkdir -p data models
+
+ARG GIT_SHA=""
+ENV GIT_SHA=${GIT_SHA}
+
+# torch>=2.6 defaults torch.load(weights_only=True); the whisperx VAD
+# checkpoint carries omegaconf objects and gets rejected. Official escape
+# hatch — safe here: every model we load is hash-pinned in config/models.yaml
+# or fetched from the pinned HF/whisperx sources.
+ENV TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+
+# Cache-urile de modele sunt redirecționate sub /app/models de
+# vsr_shared/model_env.py (TORCH_HOME/HF_HOME/INSIGHTFACE_HOME) — worker-ul
+# o face singur la pornire; nimic nu se descarcă în imagine.
+
+CMD ["python", "backend/run_worker.py"]

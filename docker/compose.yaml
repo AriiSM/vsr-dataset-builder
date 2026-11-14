@@ -1,0 +1,109 @@
+# vsr-dataset-builder — orchestrarea imaginilor. Rulează DIN rădăcina repo-ului:
+#
+#   docker compose -f docker/compose.yaml --profile ui up -d                     # frontend + api
+#   docker compose -f docker/compose.yaml --profile ui --profile worker up -d    # + pipeline
+#   docker compose -f docker/compose.yaml --profile refiner up refiner            # rulare de noapte
+#   docker compose -f docker/compose.yaml pull                                    # de pe registry
+#
+# Containere (nume vizibile în Docker Desktop, grupul „vsr-dataset-builder"):
+#   vsr-frontend            UI React + nginx (static, /media, proxy /api)
+#   vsr-api                 FastAPI: catalog, review, coada de job-uri (fără GPU)
+#   vsr-pipeline-worker     consumă coada și rulează pipeline-ul pe GPU
+#   vsr-transcript-refiner  a doua opinie pe transcrieri (pornit manual)
+#
+# Metadatele stau în MongoDB — serviciul separat ../vsr-mongo (pornește-l
+# primul: `docker compose up -d` în acel folder). Containerele îl ating prin
+# rețeaua partajată `vsr-net` ca vsr-mongo:27017; credențialele vin din .env
+# (MONGO_URI), MONGO_HOST doar schimbă host-ul pentru interiorul rețelei.
+# Datele media NU trăiesc în imagini: ./data ./models ./config sunt volume locale.
+# ATENȚIE (Windows): plafonează RAM-ul WSL2 în %UserProfile%\.wslconfig
+#   [wsl2]
+#   memory=8GB
+
+name: vsr-dataset-builder
+
+x-mongo-env: &mongo-env
+  MONGO_HOST: vsr-mongo:27017
+
+services:
+  frontend:
+    image: ${IMAGE_PREFIX:-vsr-dataset-builder}-frontend:${TAG:-latest}
+    container_name: vsr-frontend
+    build:
+      context: ..
+      dockerfile: docker/frontend.Dockerfile
+    ports:
+      - "${VSR_UI_PORT:-8080}:80"
+    volumes:
+      - ../data:/data:ro                  # /media direct de pe disc, read-only
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: [ui]
+
+  api:
+    image: ${IMAGE_PREFIX:-vsr-dataset-builder}-api:${TAG:-latest}
+    container_name: vsr-api
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-}
+    expose:
+      - "8000"                            # doar în rețeaua compose — nginx e ușa
+    volumes:
+      - ../data:/app/data
+      - ../config:/app/config:ro
+    env_file: ../.env
+    environment:
+      <<: *mongo-env
+      GIT_SHA: ${GIT_SHA:-}
+    networks: [default, vsr-net]
+    restart: unless-stopped
+    profiles: [ui]
+
+  worker:
+    image: ${IMAGE_PREFIX:-vsr-dataset-builder}-pipeline-worker:${TAG:-latest}
+    container_name: vsr-pipeline-worker
+    build:
+      context: ..
+      dockerfile: docker/worker.Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-}
+    gpus: all                             # cere nvidia-container-toolkit
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+      # rw (nu :ro): `fetch_models.py --pin` scrie hash-urile în config/models.yaml
+      - ../config:/app/config
+    env_file: ../.env
+    environment:
+      <<: *mongo-env
+      GIT_SHA: ${GIT_SHA:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+    networks: [default, vsr-net]
+    restart: unless-stopped
+    profiles: [worker]
+
+  # review_assistant / transcript_refiner — aceeași imagine ca workerul,
+  # altă comandă; pornit manual, de regulă noaptea, când pipeline-ul stă.
+  refiner:
+    image: ${IMAGE_PREFIX:-vsr-dataset-builder}-pipeline-worker:${TAG:-latest}
+    container_name: vsr-transcript-refiner
+    command: ["python", "backend/services/transcript_refiner/main.py"]
+    gpus: all
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+      - ../config:/app/config:ro
+    env_file: ../.env
+    environment:
+      <<: *mongo-env
+      HF_TOKEN: ${HF_TOKEN:-}
+    networks: [default, vsr-net]
+    profiles: [refiner]
+
+networks:
+  vsr-net:
+    external: true                        # creată de ../vsr-mongo/compose.yaml

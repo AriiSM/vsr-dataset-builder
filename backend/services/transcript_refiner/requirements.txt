@@ -1,0 +1,6 @@
+# transcript_refiner — second-opinion transcription with large-v3 int8
+faster-whisper>=1.0    # int8 fits a 4GB GPU; CPU works too (slower)
+pandas>=2.0
+jiwer>=3.0             # optional — pure-python fallback exists in wer_utils
+imageio-ffmpeg>=0.4
+loguru>=0.7

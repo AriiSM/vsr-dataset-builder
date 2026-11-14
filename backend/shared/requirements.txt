@@ -1,0 +1,3 @@
+# vsr_shared — cod comun (catalog_db, schemas, WER). Instalat de api și worker.
+numpy>=1.24
+pymongo>=4.8           # catalog metadata (vsr-mongo)
